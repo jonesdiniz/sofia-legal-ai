@@ -47,6 +47,14 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        "user-bubble": {
+          DEFAULT: "hsl(var(--user-bubble))",
+          foreground: "hsl(var(--user-bubble-foreground))",
+        },
+        "sofia-bubble": {
+          DEFAULT: "hsl(var(--sofia-bubble))",
+          foreground: "hsl(var(--sofia-bubble-foreground))",
+        },
         sidebar: {
           DEFAULT: "hsl(var(--sidebar-background))",
           foreground: "hsl(var(--sidebar-foreground))",
