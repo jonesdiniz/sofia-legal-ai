@@ -155,7 +155,7 @@ ${contextText}
 
   const response = await openai.chat.completions.create({
     model: "gpt-4o", // ou "gpt-4o-mini" para custo menor
-    messages: messages as any,
+    messages: messages,
     temperature: 0.7, // Ajuste conforme necessário (0.7 = mais criativo, 0.3 = mais determinístico)
     max_tokens: 800, // Limite de tokens para a resposta (ajustar conforme necessário)
   });

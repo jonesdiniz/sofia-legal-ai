@@ -30,6 +30,8 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     <form
       onSubmit={handleSubmit}
       className="sticky bottom-0 border-t border-border bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80 p-4"
+      role="search"
+      aria-label="Enviar mensagem para Sofia"
     >
       <div className="container max-w-4xl mx-auto">
         <div className="flex gap-2 items-end">
@@ -40,17 +42,21 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
             placeholder="Descreva sua dúvida sobre INSS ou regimes próprios..."
             className="min-h-[60px] max-h-[200px] resize-none"
             disabled={disabled}
+            aria-label="Digite sua dúvida sobre previdência"
+            aria-describedby="chat-disclaimer"
           />
           <Button
             type="submit"
             size="icon"
             className="h-[60px] w-[60px] flex-shrink-0"
             disabled={!input.trim() || disabled}
+            aria-label="Enviar mensagem"
           >
-            <Send className="h-5 w-5" />
+            <Send className="h-5 w-5" aria-hidden="true" />
+            <span className="sr-only">Enviar</span>
           </Button>
         </div>
-        <p className="text-xs text-muted-foreground mt-2 text-center">
+        <p id="chat-disclaimer" className="text-xs text-muted-foreground mt-2 text-center">
           Este atendimento virtual é informativo e não substitui consulta jurídica individual
           com advogado.
         </p>
