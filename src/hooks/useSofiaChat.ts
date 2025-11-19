@@ -85,7 +85,7 @@ export function useSofiaChat() {
         });
 
         // 4. Chama a edge function do Supabase
-        const { data, error } = await supabase.functions.invoke<ChatResponse>("bright-worker", {
+        const { data, error } = await supabase.functions.invoke<ChatResponse>("chat-agent", {
           body: requestBody,
         });
 
