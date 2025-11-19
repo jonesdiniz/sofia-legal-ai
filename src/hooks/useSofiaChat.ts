@@ -2,11 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { logger } from "@/lib/logger";
 import { SOFIA_ORG_ID, CONVERSATION_STORAGE_KEY, TYPING_CONFIG } from "@/lib/constants";
-import {
-  splitIntoChunks,
-  calculateFirstMessageDelay,
-  calculateSubsequentMessageDelay,
-} from "./chatUtils";
+import { splitIntoChunks, calculateFirstMessageDelay, calculateSubsequentMessageDelay } from "./chatUtils";
 
 export interface Message {
   id: string;
@@ -89,12 +85,9 @@ export function useSofiaChat() {
         });
 
         // 4. Chama a edge function do Supabase
-        const { data, error } = await supabase.functions.invoke<ChatResponse>(
-          "chat-agent",
-          {
-            body: requestBody,
-          }
-        );
+        const { data, error } = await supabase.functions.invoke<ChatResponse>("bright-worker", {
+          body: requestBody,
+        });
 
         // Calcula quanto tempo a chamada de rede levou
         const networkElapsedMs = Date.now() - networkStartTime;
@@ -117,8 +110,8 @@ export function useSofiaChat() {
 
         logger.debug("Resposta recebida", {
           has_data: !!data,
-          has_answer: !!(responseData?.answer),
-          has_conversation_id: !!(responseData?.conversation_id),
+          has_answer: !!responseData?.answer,
+          has_conversation_id: !!responseData?.conversation_id,
           network_elapsed_ms: networkElapsedMs,
         });
 
@@ -140,7 +133,7 @@ export function useSofiaChat() {
 
         logger.debug("Resposta dividida em chunks", {
           total_chunks: chunks.length,
-          chunk_sizes: chunks.map(c => c.length),
+          chunk_sizes: chunks.map((c) => c.length),
         });
 
         // 9. Envia cada chunk com delays humanizados
@@ -174,7 +167,6 @@ export function useSofiaChat() {
 
         // 10. Desativa indicador de digitação após enviar todos os chunks
         setIsTyping(false);
-
       } catch (err) {
         logger.error("Erro inesperado ao enviar mensagem", err);
 
@@ -182,8 +174,7 @@ export function useSofiaChat() {
         const errorMessage: Message = {
           id: crypto.randomUUID(),
           actor: "sofia",
-          content:
-            "Opa, tive um probleminha técnico aqui... Pode tentar me perguntar de novo, por favor?",
+          content: "Opa, tive um probleminha técnico aqui... Pode tentar me perguntar de novo, por favor?",
           createdAt: new Date(),
         };
 
@@ -194,7 +185,7 @@ export function useSofiaChat() {
         setLoading(false);
       }
     },
-    [loading, conversationId]
+    [loading, conversationId],
   );
 
   /**
