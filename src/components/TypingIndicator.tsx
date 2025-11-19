@@ -7,9 +7,14 @@ import { Bot } from "lucide-react";
  */
 export function TypingIndicator() {
   return (
-    <div className="flex gap-3 mb-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+    <div
+      className="flex gap-3 mb-4 animate-in fade-in slide-in-from-bottom-2 duration-300"
+      role="status"
+      aria-live="polite"
+      aria-label="Sofia está digitando"
+    >
       {/* Avatar da Sofia */}
-      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-sofia-bubble flex items-center justify-center">
+      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-sofia-bubble flex items-center justify-center" aria-hidden="true">
         <Bot className="h-5 w-5 text-primary" />
       </div>
 
@@ -19,7 +24,7 @@ export function TypingIndicator() {
           <span className="text-sm text-muted-foreground">Sofia está digitando</span>
 
           {/* Bolinhas animadas */}
-          <div className="flex gap-1 ml-2">
+          <div className="flex gap-1 ml-2" aria-hidden="true">
             <span className="w-2 h-2 bg-primary rounded-full animate-bounce [animation-delay:-0.3s]" />
             <span className="w-2 h-2 bg-primary rounded-full animate-bounce [animation-delay:-0.15s]" />
             <span className="w-2 h-2 bg-primary rounded-full animate-bounce" />
