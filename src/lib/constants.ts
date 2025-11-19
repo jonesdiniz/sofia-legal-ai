@@ -18,24 +18,21 @@ export const CONVERSATION_STORAGE_KEY = "sofia_conversation_id";
  * Ajuste esses valores para controlar a velocidade e naturalidade das respostas.
  */
 export const TYPING_CONFIG = {
-  // Para a primeira mensagem (após receber resposta da IA)
   firstMessage: {
-    minTotalDelay: 900,    // Mínimo total de "pensando + digitando" (ms)
-    maxTotalDelay: 4500,   // Máximo total de "pensando + digitando" (ms)
-    msPerChar: 18,         // Base de tempo por caractere (ms)
-    jitterRange: 200,      // Variação aleatória (±ms)
+    minTotalDelay: 1200,
+    maxTotalDelay: 5000,
+    msPerChar: 20,
+    jitterRange: 250,
   },
-  // Para mensagens subsequentes (chunks seguintes)
   subsequentMessages: {
-    baseDelay: 300,        // Delay base mínimo (ms)
-    minDelay: 500,         // Delay mínimo total (ms)
-    maxDelay: 3000,        // Delay máximo total (ms)
-    msPerChar: 12,         // Base de tempo por caractere (ms)
-    jitterRange: 150,      // Variação aleatória (±ms)
+    baseDelay: 900, // antes 300
+    minDelay: 1200, // antes 500
+    maxDelay: 4500, // antes 3000
+    msPerChar: 16, // um pouco mais “lenta”
+    jitterRange: 250,
   },
-  // Tamanho ideal dos chunks de texto
   chunkSize: {
-    min: 50,               // Tamanho mínimo para considerar quebra
-    max: 200,              // Tamanho máximo do chunk
-  }
+    min: 120, // antes 50
+    max: 260, // antes 200
+  },
 } as const;
