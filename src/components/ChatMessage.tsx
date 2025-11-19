@@ -6,6 +6,10 @@ interface ChatMessageProps {
   message: Message;
 }
 
+/**
+ * Componente de mensagem do chat.
+ * Renderiza mensagens do usuário e da Sofia com estilos e alinhamento apropriados.
+ */
 export function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.actor === "user";
 
@@ -16,6 +20,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
         isUser ? "flex-row-reverse" : "flex-row"
       )}
     >
+      {/* Avatar */}
       <div
         className={cn(
           "flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center",
@@ -29,6 +34,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
         )}
       </div>
 
+      {/* Balão de mensagem */}
       <div
         className={cn(
           "max-w-[75%] rounded-2xl px-4 py-3 shadow-sm",

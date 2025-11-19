@@ -2,13 +2,37 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
 
-const SUPABASE_URL = "https://fbyjnoymzdjtyzsgkeba.supabase.co";
-const SUPABASE_PUBLISHABLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZieWpub3ltemRqdHl6c2drZWJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjMzOTgzMzUsImV4cCI6MjA3ODk3NDMzNX0.QOTCJTaWDmQBYfQHWRnFDL2VC03crdq7KWC-jOtUJz8";
+/**
+ * Supabase Client Configuration
+ *
+ * IMPORTANTE: Este cliente usa variáveis de ambiente para configuração.
+ * As seguintes variáveis devem estar definidas no arquivo .env:
+ *
+ * - VITE_SUPABASE_URL: URL do projeto Supabase
+ * - VITE_SUPABASE_ANON_KEY: Chave pública (anon/publishable) do Supabase
+ *
+ * ATENÇÃO: A variável VITE_SUPABASE_ANON_KEY deve conter APENAS o token JWT,
+ * sem o prefixo "Bearer ". Exemplo correto:
+ *   VITE_SUPABASE_ANON_KEY="eyJhbGc..."
+ * Exemplo ERRADO:
+ *   VITE_SUPABASE_ANON_KEY="Bearer eyJhbGc..."
+ */
+
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+// Guard: valida que as variáveis de ambiente estão definidas
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error(
+    "Missing Supabase environment variables. " +
+    "Please ensure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are defined in your .env file."
+  );
+}
 
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";
 
-export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+export const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey, {
   auth: {
     storage: localStorage,
     persistSession: true,
