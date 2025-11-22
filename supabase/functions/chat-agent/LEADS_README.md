@@ -1,8 +1,10 @@
 # 🎯 Sistema de Leads - Resumo Rápido
 
-## O que foi implementado?
+## ✨ STATUS: DETECÇÃO AUTOMÁTICA ATIVA
 
-Sistema completo de captura e armazenamento de leads durante conversas com a Sofia.
+🎉 **A captura automática de leads já está funcionando!**
+
+Sistema completo de captura e armazenamento de leads durante conversas com a Sofia, com **detecção automática via Abordagem 1 (JSON escondido)**.
 
 ---
 
@@ -17,10 +19,12 @@ SQL completo para criar:
 - Políticas RLS
 
 ### 2. `supabase/functions/chat-agent/index.ts` (modificado)
-Adicionado:
+✨ **ATUALIZADO COM DETECÇÃO AUTOMÁTICA:**
 - **Linhas 56-84:** Interfaces e tipos de Lead
-- **Linhas 108-192:** Função `createLead` completa
-- **Linhas 671-751:** Comentários detalhados sobre detecção de leads (3 abordagens)
+- **Linhas 108-162:** Função `createLead` completa
+- **Linhas 194-258:** ✨ Função `extractLeadMetadata` (NOVA)
+- **Linhas 490-526:** ✨ Bloco CAPTURA DE LEADS no systemPrompt (NOVO)
+- **Linhas 760-826:** ✨ Integração: extrai metadados, salva cleanAnswer, cria lead (NOVO)
 
 ### 3. `supabase/functions/chat-agent/LEADS_GUIDE.md`
 Guia completo com:
@@ -47,14 +51,25 @@ Resumo executivo.
 -- Copiar index.ts para edge function "chat-agent" no Supabase
 ```
 
-### 3. Testar criação manual
-```sql
-INSERT INTO leads (org_id, conversation_id, nome, whatsapp, tipo_caso, temperatura, status)
-VALUES ('seu-org-id', 'uuid-conversa', 'João Teste', '11999887766', 'Aposentadoria', 'quente', 'novo');
+### 3. ✨ Testar detecção automática (JÁ ESTÁ ATIVA!)
+
+Envie pelo frontend:
+```
+Oi Sofia, preciso de ajuda. Meu benefício foi negado e quero falar com um advogado.
+Meu nome é João Silva, telefone 11 99887-7665.
 ```
 
-### 4. Implementar detecção automática
-Escolha uma das 3 abordagens em `LEADS_GUIDE.md` e implemente.
+Verifique nos logs:
+```
+[chat-agent] ✨ Lead capturado automaticamente: { lead_id: '...', nome: 'João Silva', ... }
+```
+
+Verifique no banco:
+```sql
+SELECT * FROM leads ORDER BY created_at DESC LIMIT 1;
+```
+
+**Ver guia completo de testes em `LEADS_GUIDE.md`**
 
 ---
 

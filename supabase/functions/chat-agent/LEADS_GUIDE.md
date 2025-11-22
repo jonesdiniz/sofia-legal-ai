@@ -4,6 +4,33 @@ Este guia mostra como implementar e testar a funcionalidade de captura de leads 
 
 ---
 
+## ✨ STATUS ATUAL: ABORDAGEM 1 IMPLEMENTADA E ATIVA
+
+🎉 **A detecção automática de leads já está funcionando!**
+
+A **Abordagem 1 (JSON escondido)** foi implementada e está ativa no código. Isso significa que:
+
+- ✅ A Sofia já está instruída a incluir metadados de lead quando detectar interesse concreto
+- ✅ A função `extractLeadMetadata` extrai os metadados automaticamente
+- ✅ Leads são criados automaticamente quando a Sofia identifica interesse
+- ✅ Os metadados são removidos antes de enviar a resposta ao usuário
+
+**O que você precisa fazer:**
+
+1. ✅ Criar a tabela `leads` no Supabase (PASSO 1 abaixo)
+2. ✅ Fazer deploy da edge function atualizada (PASSO 2 abaixo)
+3. ✅ Testar com mensagens que demonstrem interesse (PASSO 4 abaixo)
+
+**Como funciona:**
+
+Quando o usuário demonstra interesse concreto (ex: "quero falar com um advogado", "como faço para contratar"), a Sofia:
+1. Responde normalmente, de forma empática e humana
+2. Inclui no final da resposta um bloco JSON invisível com dados do lead
+3. A edge function extrai esse JSON, cria o lead no banco, e remove o bloco antes de enviar ao usuário
+4. O usuário vê apenas a resposta normal, sem saber que um lead foi criado
+
+---
+
 ## 📋 Pré-requisitos
 
 Antes de começar, certifique-se de que:
@@ -67,214 +94,130 @@ Após o deploy, verifique os logs:
 
 ---
 
-## 🧪 PASSO 3: Testar criação de leads MANUALMENTE
+## 🧪 PASSO 3: Testar detecção automática de leads
 
-Como a detecção automática ainda não está implementada (está comentada), você pode testar a função `createLead` diretamente.
+🎉 **A detecção automática JÁ ESTÁ ATIVA!** Você pode testar enviando mensagens que demonstrem interesse.
 
-### Opção A: Via SQL (mais simples)
+### Teste 1: Mensagem com interesse explícito
 
-Execute no SQL Editor:
-
-```sql
--- Inserir lead de teste manualmente
-INSERT INTO leads (
-  org_id,
-  conversation_id,
-  client_id,
-  nome,
-  whatsapp,
-  tipo_caso,
-  situacao_atual,
-  descricao_resumida,
-  temperatura,
-  status
-) VALUES (
-  'b4c42a5e-ee6c-449c-965f-1139a1d8ce77', -- seu org_id
-  (SELECT id FROM conversations ORDER BY created_at DESC LIMIT 1), -- última conversa
-  'test-client-123',
-  'João da Silva',
-  '11999887766',
-  'Aposentadoria por Idade',
-  'Trabalhou 30 anos como CLT, quer se aposentar',
-  'Cliente tem 62 anos, tempo suficiente, quer orientação',
-  'quente',
-  'novo'
-) RETURNING *;
+1. **Envie pelo frontend:**
+```
+Oi Sofia, eu preciso de ajuda. Meu benefício do INSS foi negado e quero falar com um advogado. Meu nome é João Silva e meu telefone é 11 99887-7665. Pode me ajudar?
 ```
 
-**Resultado esperado:**
-- Lead criado com sucesso
-- `id`, `created_at` e `updated_at` preenchidos automaticamente
-
-### Opção B: Via código temporário na edge function
-
-Adicione este código temporariamente **no final do handler**, logo antes do `return jsonResponse`:
-
-```typescript
-// === TESTE TEMPORÁRIO - REMOVER DEPOIS ===
-if (question.toLowerCase().includes("criar lead teste")) {
-  const testLead: Lead = {
-    org_id,
-    conversation_id: convId,
-    client_id: client_id || "test-client",
-    nome: "Maria de Teste",
-    whatsapp: "11987654321",
-    tipo_caso: "Revisão de Benefício",
-    situacao_atual: "Recebe aposentadoria há 5 anos, quer revisar",
-    descricao_resumida: "Cliente acredita que cálculo está errado",
-    temperatura: "morno",
-    status: "novo",
-  };
-
-  const leadId = await createLead(supabase, testLead);
-  console.log("[chat-agent] TESTE: Lead criado com ID:", leadId);
-}
-// === FIM TESTE ===
+2. **Verifique nos logs da edge function:**
+```
+[chat-agent] Metadados de lead encontrados, parseando JSON...
+[chat-agent] Metadados de lead extraídos com sucesso: { has_nome: true, has_whatsapp: true, has_tipo_caso: true, temperatura: 'quente' }
+[chat-agent] Criando lead: { nome: 'João Silva', tipo_caso: '...', temperatura: 'quente', ... }
+[chat-agent] Lead criado com sucesso: { lead_id: 'uuid-aqui', nome: 'João Silva', temperatura: 'quente' }
+[chat-agent] ✨ Lead capturado automaticamente: { lead_id: 'uuid-aqui', ... }
 ```
 
-**Como testar:**
-1. Envie pelo frontend: "criar lead teste"
-2. Verifique os logs da edge function
-3. Verifique no SQL Editor:
-
+3. **Verifique no banco:**
 ```sql
 SELECT * FROM leads ORDER BY created_at DESC LIMIT 1;
 ```
 
 **Resultado esperado:**
-- Log: `[chat-agent] TESTE: Lead criado com ID: uuid-aqui`
-- Lead aparece na tabela `leads`
+- ✅ Lead criado com nome "João Silva", whatsapp "11 99887-7665", temperatura "quente"
+- ✅ Resposta da Sofia NO FRONTEND não contém o bloco JSON (foi removido)
+- ✅ Resposta salva na tabela `messages` também NÃO contém o bloco JSON
+
+### Teste 2: Mensagem sem interesse (não deve criar lead)
+
+1. **Envie pelo frontend:**
+```
+Oi Sofia, só queria saber o que é aposentadoria por idade. Curiosidade mesmo.
+```
+
+2. **Verifique nos logs:**
+```
+[chat-agent] Resposta gerada com sucesso (length: ...)
+[chat-agent] Resposta da Sofia salva com sucesso
+(SEM logs de lead)
+```
+
+3. **Verifique no banco:**
+```sql
+SELECT * FROM leads WHERE created_at > NOW() - INTERVAL '1 minute';
+```
+
+**Resultado esperado:**
+- ✅ Nenhum lead criado (Sofia não incluiu metadados)
+- ✅ Resposta normal foi enviada
+
+### Teste 3: Interesse com dados parciais
+
+1. **Envie pelo frontend:**
+```
+Oi Sofia, quero saber como faço para contratar o escritório de vocês. Meu benefício foi cortado e estou desesperado.
+```
+
+**Resultado esperado:**
+- ⚠️ Sofia pode criar lead com temperatura "morno" ou "quente"
+- ⚠️ Nome e whatsapp podem estar como "Não informado" (Sofia pode pedir esses dados em seguida)
+- ✅ Se dados essenciais estiverem faltando, a edge function ignora (validação)
 
 ---
 
-## 🚀 PASSO 4: Implementar detecção automática de leads
+## 📚 REFERÊNCIA: Detalhes da Abordagem 1 (Implementada)
 
-Agora que a infraestrutura está funcionando, você pode implementar a detecção. Há 3 abordagens principais:
+A **Abordagem 1 (JSON escondido)** já está ativa no código. Veja como funciona:
 
-### Abordagem 1: JSON escondido na resposta (RECOMENDADA)
+### ✅ O que foi implementado:
 
-**Vantagens:**
-- Uma única chamada à OpenAI (econômico)
-- Preciso e controlado
-- Dados estruturados
+1. **systemPrompt atualizado** (linhas ~490-526 do index.ts):
+   - Adicionado bloco "CAPTURA DE LEADS (INTERESSE CONCRETO)"
+   - Instruções claras sobre quando incluir metadados
+   - Formato exato do JSON: `---LEAD_DATA_START--- {...} ---LEAD_DATA_END---`
+   - Critérios de temperatura (quente/morno/frio)
 
-**Como implementar:**
+2. **Função extractLeadMetadata** (linhas ~194-258 do index.ts):
+   - Regex robusta para capturar bloco JSON
+   - Parsing com try/catch (fail-safe)
+   - Remove metadados da resposta (usuário não vê)
+   - Logs estruturados para debug
 
-1. **Modificar o systemPrompt** (adicionar ao final):
+3. **Integração no handler** (linhas ~760-826 do index.ts):
+   - **Passo 8:** Extrai metadados de `answer`
+   - **Passo 9:** Salva `cleanAnswer` no banco (sem metadados)
+   - **Passo 10:** Cria lead se metadados válidos
+   - **Passo 11:** Retorna `cleanAnswer` ao frontend
 
-```typescript
-// Adicione isso ao final do systemPrompt em callChatModel
-`
-====================
-CAPTURA DE LEADS
-====================
-Se durante a conversa você identificar que a pessoa tem INTERESSE CONCRETO em contratar os serviços do escritório, inclua no FINAL da sua resposta (após o texto normal) um bloco de metadados no seguinte formato:
-
-INDICADORES DE INTERESSE CONCRETO:
-- Pessoa pede valores/orçamento
-- Pessoa pergunta "como faço para contratar"
-- Pessoa pede contato de advogado
-- Pessoa diz explicitamente que quer ajuda jurídica
-- Pessoa fornece dados pessoais (nome, telefone) voluntariamente
-
-FORMATO DOS METADADOS (coloque APÓS sua resposta normal):
-
----LEAD_DATA_START---
-{
-  "nome": "Nome da pessoa (ou 'Não informado')",
-  "whatsapp": "Telefone informado (ou 'Não informado')",
-  "tipo_caso": "Tipo de caso previdenciário",
-  "situacao_atual": "Resumo da situação",
-  "descricao_resumida": "Breve descrição do interesse",
-  "temperatura": "quente" | "morno" | "frio"
-}
----LEAD_DATA_END---
-
-ATENÇÃO:
-- APENAS inclua esses metadados se houver interesse CONCRETO (não em toda mensagem)
-- O bloco de metadados NÃO será exibido ao usuário (será removido automaticamente)
-- Continue respondendo normalmente ANTES dos metadados
-`
-```
-
-2. **Criar função para extrair metadados:**
+### 🔍 Como o código funciona:
 
 ```typescript
-// Adicione essa função após createLead
-function extractLeadMetadata(answer: string): {
-  cleanAnswer: string;
-  leadData: Partial<Lead> | null;
-} {
-  const leadDataRegex = /---LEAD_DATA_START---([\s\S]*?)---LEAD_DATA_END---/;
-  const match = answer.match(leadDataRegex);
+// PASSO 7: Sofia responde (com possíveis metadados)
+const answer = await callChatModel(...);
 
-  if (!match) {
-    return { cleanAnswer: answer, leadData: null };
-  }
-
-  try {
-    const jsonStr = match[1].trim();
-    const leadData = JSON.parse(jsonStr);
-
-    // Remove o bloco de metadados da resposta
-    const cleanAnswer = answer.replace(leadDataRegex, '').trim();
-
-    console.log("[chat-agent] Metadados de lead extraídos:", leadData);
-
-    return { cleanAnswer, leadData };
-  } catch (error) {
-    console.error("[chat-agent] Erro ao parsear metadados de lead:", error);
-    return { cleanAnswer: answer, leadData: null };
-  }
-}
-```
-
-3. **Descomentar e adaptar o código no handler:**
-
-```typescript
-// No passo 8.5, substitua o TODO por:
+// PASSO 8: Extrai metadados
 const { cleanAnswer, leadData } = extractLeadMetadata(answer);
 
-if (leadData && leadData.nome && leadData.whatsapp && leadData.tipo_caso) {
-  const fullLeadData: Lead = {
-    org_id,
-    conversation_id: convId,
-    client_id: client_id || undefined,
-    nome: leadData.nome,
-    whatsapp: leadData.whatsapp,
-    tipo_caso: leadData.tipo_caso,
-    situacao_atual: leadData.situacao_atual || null,
-    descricao_resumida: leadData.descricao_resumida || null,
-    temperatura: (leadData.temperatura as LeadTemperatura) || "morno",
-    status: "novo",
-  };
+// PASSO 9: Salva resposta SEM metadados
+await supabase.from("messages").insert({ content: cleanAnswer, ... });
 
-  const leadId = await createLead(supabase, fullLeadData);
-  if (leadId) {
-    console.log("[chat-agent] Lead capturado automaticamente:", leadId);
-  }
+// PASSO 10: Cria lead se dados válidos
+if (leadData && leadData.nome !== "Não informado" && ...) {
+  const leadId = await createLead(supabase, fullLead);
+  console.log("[chat-agent] ✨ Lead capturado automaticamente:", leadId);
 }
 
-// Use cleanAnswer ao invés de answer no retorno
-return jsonResponse({
-  answer: cleanAnswer, // <-- resposta sem metadados
-  conversation_id: convId,
-  context_used: contextChunks.map((c) => ({
-    content: c.content,
-    similarity: c.similarity,
-  })),
-});
+// PASSO 11: Retorna resposta SEM metadados
+return jsonResponse({ answer: cleanAnswer, ... });
 ```
 
-### Abordagem 2: Segunda chamada à OpenAI
+### 🎯 Validações implementadas:
 
-**Vantagens:**
-- Não altera o prompt da Sofia
-- Análise mais sofisticada possível
+- ✅ Metadados devem ter `nome`, `whatsapp` e `tipo_caso`
+- ✅ Valores não podem ser "Não informado" (filtro de placeholders)
+- ✅ Erro no parsing → lead não criado, resposta continua normalmente
+- ✅ Erro ao salvar lead → logado mas não quebra o chat
+- ✅ Usuário NUNCA vê o bloco JSON (sempre removido)
 
-**Desvantagens:**
-- Dobra o custo (2 chamadas à API)
-- Latência adicional
+---
+
+## 📊 Monitoramento de Leads
 
 **Como implementar:**
 
