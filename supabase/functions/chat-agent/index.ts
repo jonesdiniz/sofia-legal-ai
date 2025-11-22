@@ -54,6 +54,36 @@ interface ChatHistoryMessage {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// TIPOS E INTERFACES - LEADS
+// ═══════════════════════════════════════════════════════════════════════════
+
+type LeadTemperatura = "frio" | "morno" | "quente";
+type LeadStatus =
+  | "novo"
+  | "em_contato"
+  | "consulta_agendada"
+  | "convertido"
+  | "nao_convertido";
+
+interface Lead {
+  org_id: string;
+  conversation_id: string;
+  client_id?: string;
+  nome: string;
+  whatsapp: string;
+  tipo_caso: string;
+  situacao_atual?: string;
+  descricao_resumida?: string;
+  temperatura: LeadTemperatura;
+  status: LeadStatus;
+}
+
+interface LeadMetadata {
+  should_create_lead: boolean;
+  lead_data?: Partial<Lead>;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // HELPERS DE CORS E RESPOSTA
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -73,6 +103,92 @@ function jsonResponse(data: unknown, status = 200): Response {
       ...buildCorsHeaders(),
     },
   });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNÇÃO: createLead
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Cria um lead no banco de dados.
+ *
+ * Esta função é chamada quando a Sofia identifica que o usuário tem interesse
+ * em contratar os serviços do escritório. Os dados do lead são extraídos da
+ * conversa e salvos na tabela `leads`.
+ *
+ * Implementa as seguintes proteções:
+ * - Validação de campos obrigatórios
+ * - Tratamento de erro com fail-safe (não quebra o fluxo do chat)
+ * - Logs estruturados para debug
+ * - Valores padrão para campos opcionais
+ *
+ * @param supabase - Cliente Supabase autenticado
+ * @param leadData - Dados do lead a ser criado
+ * @returns ID do lead criado ou null em caso de erro
+ */
+async function createLead(
+  supabase: ReturnType<typeof createClient>,
+  leadData: Lead
+): Promise<string | null> {
+  try {
+    // Validação básica de campos obrigatórios
+    if (!leadData.nome || !leadData.whatsapp || !leadData.tipo_caso) {
+      console.error("[chat-agent] Lead inválido - campos obrigatórios faltando:", {
+        has_nome: !!leadData.nome,
+        has_whatsapp: !!leadData.whatsapp,
+        has_tipo_caso: !!leadData.tipo_caso,
+      });
+      return null;
+    }
+
+    console.log("[chat-agent] Criando lead:", {
+      nome: leadData.nome,
+      tipo_caso: leadData.tipo_caso,
+      temperatura: leadData.temperatura,
+      conversation_id: leadData.conversation_id,
+    });
+
+    // Inserir lead no banco
+    const { data: newLead, error: leadError } = await supabase
+      .from("leads")
+      .insert({
+        org_id: leadData.org_id,
+        conversation_id: leadData.conversation_id,
+        client_id: leadData.client_id || null,
+        nome: leadData.nome,
+        whatsapp: leadData.whatsapp,
+        tipo_caso: leadData.tipo_caso,
+        situacao_atual: leadData.situacao_atual || null,
+        descricao_resumida: leadData.descricao_resumida || null,
+        temperatura: leadData.temperatura || "morno",
+        status: leadData.status || "novo",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .select("id")
+      .single();
+
+    if (leadError) {
+      console.error("[chat-agent] Erro ao criar lead:", leadError);
+      return null; // Fail-safe: não quebra o fluxo do chat
+    }
+
+    if (!newLead || !newLead.id) {
+      console.error("[chat-agent] Lead criado mas ID não retornado");
+      return null;
+    }
+
+    console.log("[chat-agent] Lead criado com sucesso:", {
+      lead_id: newLead.id,
+      nome: leadData.nome,
+      temperatura: leadData.temperatura,
+    });
+
+    return newLead.id;
+  } catch (error) {
+    console.error("[chat-agent] Erro inesperado ao criar lead:", error);
+    return null; // Fail-safe: não quebra o fluxo do chat
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -551,6 +667,88 @@ serve(async (req: Request) => {
     }
 
     console.log("[chat-agent] Resposta da Sofia salva com sucesso");
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 8.5. DETECÇÃO E CRIAÇÃO DE LEADS (FUTURO)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // TODO: IMPLEMENTAR DETECÇÃO DE LEADS
+    //
+    // Aqui você deve implementar a lógica para detectar se a Sofia identificou
+    // um lead na conversa. Existem duas abordagens principais:
+    //
+    // ABORDAGEM 1: Buscar JSON escondido na resposta da Sofia
+    // ----------------------------------------------------------
+    // Se você modificar o prompt da Sofia para incluir metadados JSON no final
+    // da resposta (ex: ```json\n{...}\n```), você pode extrair assim:
+    //
+    // const leadMetadata = extractLeadMetadata(answer);
+    // if (leadMetadata.should_create_lead && leadMetadata.lead_data) {
+    //   const leadData: Lead = {
+    //     org_id,
+    //     conversation_id: convId,
+    //     client_id: client_id || undefined,
+    //     nome: leadMetadata.lead_data.nome!,
+    //     whatsapp: leadMetadata.lead_data.whatsapp!,
+    //     tipo_caso: leadMetadata.lead_data.tipo_caso!,
+    //     situacao_atual: leadMetadata.lead_data.situacao_atual,
+    //     descricao_resumida: leadMetadata.lead_data.descricao_resumida,
+    //     temperatura: leadMetadata.lead_data.temperatura || "morno",
+    //     status: "novo",
+    //   };
+    //
+    //   const leadId = await createLead(supabase, leadData);
+    //   if (leadId) {
+    //     console.log("[chat-agent] Lead capturado automaticamente:", leadId);
+    //     // Opcionalmente, remover o JSON da resposta antes de enviar ao frontend:
+    //     // answer = answer.replace(/```json\n[\s\S]*?\n```/g, '').trim();
+    //   }
+    // }
+    //
+    // ABORDAGEM 2: Segunda chamada à OpenAI para análise
+    // ----------------------------------------------------
+    // Fazer uma segunda chamada à OpenAI com um prompt específico para analisar
+    // se a conversa indica interesse em contratar, e extrair dados estruturados:
+    //
+    // const leadAnalysis = await analyzeForLead(openai, chatHistory, question, answer);
+    // if (leadAnalysis.is_lead) {
+    //   const leadData: Lead = {
+    //     org_id,
+    //     conversation_id: convId,
+    //     client_id: client_id || undefined,
+    //     ...leadAnalysis.lead_data,
+    //     status: "novo",
+    //   };
+    //   await createLead(supabase, leadData);
+    // }
+    //
+    // ABORDAGEM 3: Detecção baseada em palavras-chave
+    // -------------------------------------------------
+    // Buscar palavras-chave na pergunta do usuário que indiquem interesse:
+    //
+    // const keywords = ["quero contratar", "quanto custa", "como faço", "me ajudem"];
+    // const hasInterest = keywords.some(kw => question.toLowerCase().includes(kw));
+    // if (hasInterest) {
+    //   // Criar lead com dados parciais (você pode coletar mais dados depois)
+    //   const leadData: Lead = {
+    //     org_id,
+    //     conversation_id: convId,
+    //     client_id: client_id || undefined,
+    //     nome: "Lead automático", // Placeholder até coletar nome real
+    //     whatsapp: "Não informado", // Placeholder
+    //     tipo_caso: "Interesse geral",
+    //     temperatura: "morno",
+    //     status: "novo",
+    //   };
+    //   await createLead(supabase, leadData);
+    // }
+    //
+    // RECOMENDAÇÃO:
+    // - Abordagem 1 é mais precisa mas requer mudança no prompt da Sofia
+    // - Abordagem 2 é mais flexível mas aumenta custo (segunda chamada à API)
+    // - Abordagem 3 é mais simples mas menos precisa
+    //
+    // Escolha a abordagem que melhor se adequa ao seu caso de uso.
 
     // ─────────────────────────────────────────────────────────────────────────
     // 9. RETORNAR RESPOSTA PARA O FRONTEND
