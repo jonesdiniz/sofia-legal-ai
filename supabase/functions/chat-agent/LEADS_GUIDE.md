@@ -159,6 +159,95 @@ Oi Sofia, quero saber como faço para contratar o escritório de vocês. Meu ben
 - ⚠️ Nome e whatsapp podem estar como "Não informado" (Sofia pode pedir esses dados em seguida)
 - ✅ Se dados essenciais estiverem faltando, a edge function ignora (validação)
 
+### Teste 4: Lead quente com informações de contato completas
+
+Este teste valida os novos campos: `melhor_horario_contato`, `canal_preferido` e `cidade_uf`.
+
+1. **Envie pelo frontend (mensagem 1):**
+```
+Oi Sofia, preciso de ajuda urgente. Sou Maria Santos de Campinas, SP, e meu auxílio-doença foi negado pelo INSS. Meu WhatsApp é 19 98765-4321. Quero falar com um advogado o quanto antes!
+```
+
+2. **Sofia deve responder perguntando:**
+- Melhor horário para contato
+- Preferência de canal (WhatsApp ou Ligação)
+
+3. **Envie resposta do usuário (mensagem 2):**
+```
+Prefiro WhatsApp mesmo, e pode ser de manhã ou no horário do almoço, entre 12h e 14h.
+```
+
+4. **Verifique nos logs da edge function:**
+```
+[chat-agent] Metadados de lead encontrados, parseando JSON...
+[chat-agent] Metadados de lead extraídos com sucesso: {
+  has_nome: true,
+  has_whatsapp: true,
+  has_tipo_caso: true,
+  temperatura: 'quente'
+}
+[chat-agent] ✨ Lead capturado automaticamente: { lead_id: '...', nome: 'Maria Santos', ... }
+```
+
+5. **Verifique no banco:**
+```sql
+SELECT
+  nome,
+  whatsapp,
+  tipo_caso,
+  melhor_horario_contato,
+  canal_preferido,
+  cidade_uf,
+  temperatura
+FROM leads
+ORDER BY created_at DESC
+LIMIT 1;
+```
+
+**Resultado esperado:**
+- ✅ Lead criado com:
+  - nome: "Maria Santos"
+  - whatsapp: "19 98765-4321"
+  - tipo_caso: "Auxílio por incapacidade temporária" (ou similar)
+  - melhor_horario_contato: "Manhã ou horário do almoço (12h-14h)" (ou similar)
+  - canal_preferido: "WhatsApp"
+  - cidade_uf: "Campinas - SP"
+  - temperatura: "quente"
+
+### Teste 5: Lead quente sem informações opcionais
+
+Valida que os campos opcionais podem ser NULL.
+
+1. **Envie pelo frontend:**
+```
+Sofia, preciso de ajuda. Meu nome é Pedro Costa, meu telefone é 21 91234-5678, e o INSS negou minha aposentadoria por idade. Pode me ajudar?
+```
+
+2. **Sofia pode ou não perguntar horário/canal** - depende do fluxo natural da conversa.
+
+3. **Verifique no banco:**
+```sql
+SELECT
+  nome,
+  whatsapp,
+  melhor_horario_contato,
+  canal_preferido,
+  cidade_uf
+FROM leads
+WHERE nome = 'Pedro Costa'
+ORDER BY created_at DESC
+LIMIT 1;
+```
+
+**Resultado esperado:**
+- ✅ Lead criado com:
+  - nome: "Pedro Costa"
+  - whatsapp: "21 91234-5678"
+  - melhor_horario_contato: NULL ou "Não informado"
+  - canal_preferido: NULL ou "Não informado"
+  - cidade_uf: NULL ou "Não informado"
+- ✅ Lead válido mesmo sem campos opcionais
+
 ---
 
 ## 📚 REFERÊNCIA: Detalhes da Abordagem 1 (Implementada)
@@ -445,6 +534,64 @@ WHERE l.id = 'uuid-do-lead'
 ORDER BY m.created_at ASC;
 ```
 
+### Leads com informações de contato completas
+
+```sql
+-- Ver leads que forneceram melhor horário e canal preferido
+SELECT
+  id,
+  nome,
+  whatsapp,
+  melhor_horario_contato,
+  canal_preferido,
+  cidade_uf,
+  temperatura,
+  created_at
+FROM leads
+WHERE org_id = 'seu-org-id'
+  AND melhor_horario_contato IS NOT NULL
+  AND melhor_horario_contato != 'Não informado'
+ORDER BY created_at DESC;
+```
+
+### Estatísticas por canal preferido
+
+```sql
+-- Análise de canal de contato preferido
+SELECT
+  canal_preferido,
+  COUNT(*) as total,
+  COUNT(*) FILTER (WHERE temperatura = 'quente') as quentes,
+  COUNT(*) FILTER (WHERE status = 'convertido') as convertidos,
+  ROUND(
+    COUNT(*) FILTER (WHERE status = 'convertido')::numeric / COUNT(*) * 100,
+    2
+  ) as taxa_conversao_pct
+FROM leads
+WHERE org_id = 'seu-org-id'
+  AND canal_preferido IS NOT NULL
+  AND canal_preferido != 'Não informado'
+GROUP BY canal_preferido
+ORDER BY total DESC;
+```
+
+### Leads por região (cidade/UF)
+
+```sql
+-- Distribuição de leads por localização
+SELECT
+  cidade_uf,
+  COUNT(*) as total,
+  COUNT(*) FILTER (WHERE temperatura = 'quente') as quentes,
+  COUNT(*) FILTER (WHERE status IN ('convertido', 'consulta_agendada')) as em_atendimento
+FROM leads
+WHERE org_id = 'seu-org-id'
+  AND cidade_uf IS NOT NULL
+  AND cidade_uf != 'Não informado'
+GROUP BY cidade_uf
+ORDER BY total DESC;
+```
+
 ---
 
 ## 🐛 Troubleshooting
@@ -484,5 +631,5 @@ Após validar a criação de leads:
 
 ---
 
-**Última atualização:** 2025-01-19
-**Versão:** 1.0 (infraestrutura de leads)
+**Última atualização:** 2025-01-22
+**Versão:** 1.1 (campos de contato: melhor_horario_contato, canal_preferido, cidade_uf)

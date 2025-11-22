@@ -71,6 +71,9 @@ interface Lead {
   tipo_caso: string;
   situacao_atual?: string;
   descricao_resumida?: string;
+  melhor_horario_contato?: string;
+  canal_preferido?: string;
+  cidade_uf?: string;
   temperatura: LeadTemperatura;
   status: LeadStatus;
 }
@@ -157,6 +160,9 @@ async function createLead(
         tipo_caso: leadData.tipo_caso,
         situacao_atual: leadData.situacao_atual || null,
         descricao_resumida: leadData.descricao_resumida || null,
+        melhor_horario_contato: leadData.melhor_horario_contato || null,
+        canal_preferido: leadData.canal_preferido || null,
+        cidade_uf: leadData.cidade_uf || null,
         temperatura: leadData.temperatura || "morno",
         status: leadData.status || "novo",
         created_at: new Date().toISOString(),
@@ -700,7 +706,13 @@ CAPTURA DE LEADS (INTERESSE CONCRETO)
 Se durante a conversa você perceber que a pessoa demonstrou **INTERESSE CONCRETO** em contratar o escritório, você deve:
 
 1. Continuar respondendo normalmente, mantendo seu tom humano, empático e estratégico.
-2. No FINAL da sua resposta (após o texto normal que o usuário vê), incluir um bloco de metadados entre marcadores especiais, exatamente neste formato:
+
+2. **QUANDO O LEAD FOR QUENTE** (urgência clara, pedido explícito de contato, ou forneceu dados):
+   - Pergunte de forma natural: "Qual o melhor horário pra equipe te chamar?" ou "Qual horário é melhor pra você?"
+   - Pergunte também: "Prefere que a gente entre em contato por WhatsApp ou ligação?" ou "WhatsApp ou ligação, o que funciona melhor pra você?"
+   - Se a pessoa mencionar cidade/estado durante a conversa, capture essa informação.
+
+3. No FINAL da sua resposta (após o texto normal que o usuário vê), incluir um bloco de metadados entre marcadores especiais, exatamente neste formato:
 
 ---LEAD_DATA_START---
 {
@@ -709,6 +721,9 @@ Se durante a conversa você perceber que a pessoa demonstrou **INTERESSE CONCRET
   "tipo_caso": "Tipo de caso previdenciário (ex.: \"Auxílio por incapacidade temporária\", \"Aposentadoria por idade\", \"Pensão por morte\")",
   "situacao_atual": "Situação resumida (ex.: \"INSS negou benefício\", \"Ainda não deu entrada\", \"Benefício foi cortado\")",
   "descricao_resumida": "Resumo em 1-2 frases do que a pessoa está buscando",
+  "melhor_horario_contato": "Horário preferido se informado (ex.: \"Manhã\", \"Tarde após 14h\", \"Após 18h\", ou \"Não informado\")",
+  "canal_preferido": "Canal preferido se informado (ex.: \"WhatsApp\", \"Ligação\", \"Qualquer um\", ou \"Não informado\")",
+  "cidade_uf": "Cidade e estado se mencionado (ex.: \"São Paulo - SP\", \"Rio de Janeiro - RJ\", ou \"Não informado\")",
   "temperatura": "quente"
 }
 ---LEAD_DATA_END---
@@ -726,6 +741,11 @@ Se durante a conversa você perceber que a pessoa demonstrou **INTERESSE CONCRET
 - Use "quente" quando houver urgência, dados fornecidos, ou pedido explícito de contato
 - Use "morno" quando houver interesse mas ainda exploratório
 - Use "frio" quando apenas demonstrou curiosidade inicial
+
+**IMPORTANTE sobre os campos opcionais:**
+- Só inclua "melhor_horario_contato", "canal_preferido" e "cidade_uf" se a pessoa fornecer essas informações
+- Use "Não informado" se não tiver a informação
+- Não invente dados - capture apenas o que foi dito
 
 **NÃO inclua esse bloco em todas as respostas.** Ele é apenas para momentos em que realmente faça sentido registrar um lead para follow-up do escritório.
 
