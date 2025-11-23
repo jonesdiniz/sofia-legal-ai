@@ -84,6 +84,25 @@ interface LeadMetadata {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// TIPOS E INTERFACES - INTELIGÊNCIA EMOCIONAL E INTENÇÃO
+// ═══════════════════════════════════════════════════════════════════════════
+
+type Sentiment = "desperate" | "frustrated" | "hopeful" | "neutral";
+type Urgency = "high" | "medium" | "low";
+type Intent = "agendar" | "preco" | "documentos" | "urgente" | "duvida_tecnica" | "saudacao" | "unknown";
+
+interface EmotionalContext {
+  sentiment: Sentiment;
+  urgency: Urgency;
+  emotionalContext: string;
+}
+
+interface IntentClassification {
+  intent: Intent;
+  confidence: number;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // HELPERS DE CORS E RESPOSTA
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -257,6 +276,210 @@ function extractLeadMetadata(answer: string): {
     // Isso garante que a resposta ao usuário não contenha o bloco quebrado
     const cleanAnswer = answer.replace(leadDataRegex, "").trim();
     return { cleanAnswer, leadData: null };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNÇÃO: analyzeEmotionalContext (INTELIGÊNCIA EMOCIONAL)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Analisa o contexto emocional e urgência da conversa.
+ *
+ * Esta função usa GPT-4o-mini para identificar:
+ * - Sentimento: desespero, frustração, esperança, neutro
+ * - Urgência: alta, média, baixa
+ *
+ * O contexto emocional é usado para adaptar o tom da Sofia dinamicamente.
+ *
+ * @param openai - Cliente OpenAI
+ * @param question - Pergunta atual do usuário
+ * @param chatHistory - Histórico recente da conversa
+ * @returns Contexto emocional estruturado
+ */
+async function analyzeEmotionalContext(
+  openai: OpenAI,
+  question: string,
+  chatHistory: ChatHistoryMessage[]
+): Promise<EmotionalContext> {
+  try {
+    const lastMessages = chatHistory
+      .slice(-3)
+      .map(m => `${m.role === "user" ? "Usuário" : "Sofia"}: ${m.content}`)
+      .join("\n");
+
+    const prompt = `Analise o sentimento e urgência desta conversa sobre direito previdenciário:
+
+HISTÓRICO RECENTE:
+${lastMessages || "Nenhum histórico"}
+
+MENSAGEM ATUAL:
+Usuário: ${question}
+
+Responda APENAS com JSON válido no formato:
+{
+  "sentiment": "desperate" | "frustrated" | "hopeful" | "neutral",
+  "urgency": "high" | "medium" | "low",
+  "emotionalContext": "Breve descrição do estado emocional (1-2 frases)"
+}
+
+Critérios:
+- desperate: desespero, angústia, "não aguento mais", "preciso urgente"
+- frustrated: frustração com INSS/sistema, negativas, burocracia
+- hopeful: esperançoso, engajado, interessado em resolver
+- neutral: apenas perguntando, sem carga emocional forte
+
+- high urgency: urgência explícita, situação crítica, pedido de contato imediato
+- medium: interesse claro mas não crítico
+- low: curiosidade, exploração`;
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.3,
+      max_tokens: 150,
+    });
+
+    const result = JSON.parse(response.choices[0]?.message?.content || "{}");
+
+    console.log("[chat-agent] Análise emocional:", {
+      sentiment: result.sentiment,
+      urgency: result.urgency,
+    });
+
+    return {
+      sentiment: result.sentiment || "neutral",
+      urgency: result.urgency || "medium",
+      emotionalContext: result.emotionalContext || "",
+    };
+  } catch (error) {
+    console.error("[chat-agent] Erro ao analisar contexto emocional:", error);
+    // Fallback seguro
+    return {
+      sentiment: "neutral",
+      urgency: "medium",
+      emotionalContext: "",
+    };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNÇÃO: classifyIntent (DETECÇÃO DE INTENÇÃO)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Classifica a intenção da mensagem do usuário.
+ *
+ * Usa padrões rápidos (regex) para casos óbvios e GPT-4o-mini para casos complexos.
+ *
+ * Intents suportadas:
+ * - agendar: quer falar com advogado, marcar consulta
+ * - preco: quer saber valores, custos
+ * - documentos: pergunta sobre documentos necessários
+ * - urgente: situação crítica, precisa resolver já
+ * - duvida_tecnica: dúvida sobre INSS, aposentadoria
+ * - saudacao: apenas cumprimentando
+ *
+ * @param openai - Cliente OpenAI
+ * @param question - Pergunta do usuário
+ * @returns Intent e confiança (0-1)
+ */
+async function classifyIntent(
+  openai: OpenAI,
+  question: string
+): Promise<IntentClassification> {
+  try {
+    // Padrões rápidos para detecção imediata (sem chamar LLM)
+    const quickPatterns: Record<Intent, RegExp> = {
+      saudacao: /^(oi|olá|ola|bom dia|boa tarde|boa noite|opa|e aí|eai)\b/i,
+      agendar: /agendar|marcar\s+(consulta|horário|hor[aá]rio)|falar com\s+(advogado|algu[eé]m)|conversar com|quero falar/i,
+      preco: /quanto\s+custa|valor|pre[çc]o|honor[aá]rio|quanto\s+(custa|cobra|cobram)|quanto\s+[ée]/i,
+      documentos: /\b(documentos?|papéis|que\s+levar|preciso\s+levar|quais?\s+documentos?)\b/i,
+      urgente: /urgente|preciso\s+(agora|j[aá]|imediato)|n[ãa]o\s+aguento|desesperado|cr[ií]tico/i,
+      duvida_tecnica: /.+/, // fallback
+      unknown: /.+/,
+    };
+
+    // Tenta match rápido primeiro (mais eficiente)
+    for (const [intent, pattern] of Object.entries(quickPatterns)) {
+      if (intent !== "duvida_tecnica" && intent !== "unknown" && pattern.test(question)) {
+        console.log(`[chat-agent] Intent detectada (regex): ${intent}`);
+        return { intent: intent as Intent, confidence: 0.9 };
+      }
+    }
+
+    // Se não bateu nenhum padrão óbvio, usa LLM para análise mais sofisticada
+    const prompt = `Classifique a intenção desta mensagem em um chat de advocacia previdenciária:
+
+"${question}"
+
+Intenções possíveis:
+- agendar: quer falar com advogado, marcar consulta
+- preco: quer saber valores, custos, honorários
+- documentos: pergunta sobre documentos necessários
+- urgente: situação crítica, precisa resolver já
+- duvida_tecnica: dúvida sobre INSS, aposentadoria, benefícios
+- saudacao: apenas cumprimentando
+
+Responda APENAS com JSON válido:
+{"intent": "...", "confidence": 0.0-1.0}`;
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+      max_tokens: 50,
+    });
+
+    const result = JSON.parse(
+      response.choices[0]?.message?.content || '{"intent":"duvida_tecnica","confidence":0.5}'
+    );
+
+    console.log("[chat-agent] Intent detectada (LLM):", result.intent);
+
+    return {
+      intent: result.intent || "duvida_tecnica",
+      confidence: result.confidence || 0.5,
+    };
+  } catch (error) {
+    console.error("[chat-agent] Erro ao classificar intent:", error);
+    return { intent: "duvida_tecnica", confidence: 0.5 }; // Fallback seguro
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNÇÃO: trackEvent (ANALYTICS)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Registra um evento de analytics no banco de dados.
+ *
+ * Usado para tracking de funil, métricas de conversão, e otimização.
+ *
+ * @param supabase - Cliente Supabase
+ * @param eventType - Tipo do evento
+ * @param orgId - ID da organização
+ * @param conversationId - ID da conversa
+ * @param metadata - Dados adicionais do evento
+ */
+async function trackEvent(
+  supabase: ReturnType<typeof createClient>,
+  eventType: string,
+  orgId: string,
+  conversationId: string,
+  metadata: Record<string, any>
+): Promise<void> {
+  try {
+    await supabase.from("analytics_events").insert({
+      event_type: eventType,
+      org_id: orgId,
+      conversation_id: conversationId,
+      metadata,
+      created_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    // Fail-safe: não quebra o chat se analytics falhar
+    console.error("[chat-agent] Erro ao registrar evento de analytics:", error);
   }
 }
 
@@ -437,6 +660,7 @@ async function callChatModel(
   question: string,
   contextChunks: any[],
   chatHistory: { role: "user" | "assistant"; content: string }[] = [],
+  emotionalContext?: EmotionalContext,
 ) {
   const contextText =
     contextChunks.length > 0
@@ -450,7 +674,22 @@ async function callChatModel(
           .join("\n\n")
       : "Nenhum trecho relevante encontrado nos documentos.";
 
-  const systemPrompt = `
+  // Boost emocional baseado no sentimento detectado
+  const emotionalBoost = emotionalContext ? {
+    desperate: "\n\n🚨 CONTEXTO EMOCIONAL: A pessoa está em situação de DESESPERO ou angústia profunda. PRIORIZE acolhimento emocional antes de qualquer explicação técnica. Use frases como 'Eu entendo sua angústia...', 'Você não está sozinho nisso...', 'Sei como é difícil...'. Mostre empatia MÁXIMA. Reduza jargão. Foque em trazer esperança e caminho claro.",
+    frustrated: "\n\n⚠️ CONTEXTO EMOCIONAL: A pessoa está FRUSTRADA (possivelmente com INSS, negativas, burocracia). Valide a frustração PRIMEIRO: 'Realmente é frustrante quando...', 'Eu entendo que você está cansado disso...'. Depois mostre que existe caminho e que o escritório pode ajudar a resolver. Tom: validação + solução.",
+    hopeful: "\n\n✨ CONTEXTO EMOCIONAL: A pessoa está ESPERANÇOSA e engajada. Reforce o otimismo! Use tom mais direto e encorajador. 'Isso tem solução...', 'Você está no caminho certo...'. Seja mais proativa em oferecer ajuda concreta.",
+    neutral: "",
+  }[emotionalContext.sentiment] || "" : "";
+
+  // Boost de urgência baseado no nível detectado
+  const urgencyBoost = emotionalContext ? {
+    high: "\n\n⏰ URGÊNCIA ALTA DETECTADA: A pessoa precisa de solução IMEDIATA. Reduza explicações longas. Vá direto para AÇÃO: 'O melhor agora é...', 'Vou te ajudar rapidamente...'. Ofereça contato com advogado de forma mais direta e rápida. Priorize próximo passo concreto.",
+    medium: "\n\n⏱️ URGÊNCIA MÉDIA: A pessoa tem interesse claro. Balance explicação com ação. Não precisa apressar mas também não prolongar demais.",
+    low: "",
+  }[emotionalContext.urgency] || "" : "";
+
+  const baseSystemPrompt = `
 Você é a Sofia, assistente jurídica especializada em Direito Previdenciário, atuando em um escritório de advocacia que atende com profundidade humana e excelência técnica.
 
 Sua função é orientar pessoas sobre:
@@ -755,6 +994,16 @@ MANTRA FINAL:
 Você não responde apenas dúvidas. Você cuida de pessoas em momentos sensíveis da vida, usando empatia, estratégia e conhecimento previdenciário para aproximar o cliente da solução – muitas vezes, conectando com o advogado certo no momento certo.
 `;
 
+  // Concatena o prompt base com os boosts emocionais (se aplicável)
+  const systemPrompt = baseSystemPrompt + emotionalBoost + urgencyBoost;
+
+  console.log("[chat-agent] SystemPrompt gerado com:", {
+    has_emotional_boost: !!emotionalBoost,
+    has_urgency_boost: !!urgencyBoost,
+    sentiment: emotionalContext?.sentiment,
+    urgency: emotionalContext?.urgency,
+  });
+
   const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
     {
       role: "system",
@@ -867,17 +1116,45 @@ serve(async (req: Request) => {
 
     const chatHistory = await getConversationHistory(supabase, convId);
 
-    const contextChunks = await searchSimilarChunks(supabase, openai, question, org_id);
+    // ─────────────────────────────────────────────────────────────────────────
+    // 6. ANÁLISE EMOCIONAL E INTENÇÃO (INTELIGÊNCIA SUPER-HUMANA)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Analisa contexto emocional e urgência
+    const emotionalContext = await analyzeEmotionalContext(openai, question, chatHistory);
+
+    // Classifica intenção da mensagem
+    const intentData = await classifyIntent(openai, question);
+
+    console.log("[chat-agent] Contexto enriquecido:", {
+      sentiment: emotionalContext.sentiment,
+      urgency: emotionalContext.urgency,
+      intent: intentData.intent,
+      intent_confidence: intentData.confidence,
+    });
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 7. CHAMAR MODELO DE IA COM HISTÓRICO
+    // 7. RAG (Retrieval Augmented Generation)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Para saudações simples, pular RAG (otimização)
+    let contextChunks: any[] = [];
+    if (intentData.intent !== "saudacao" || intentData.confidence < 0.8) {
+      contextChunks = await searchSimilarChunks(supabase, openai, question, org_id);
+    } else {
+      console.log("[chat-agent] Saudação detectada - pulando RAG");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 8. CHAMAR MODELO DE IA COM HISTÓRICO + CONTEXTO EMOCIONAL
     // ─────────────────────────────────────────────────────────────────────────
 
     const answer = await callChatModel(
       openai,
       question,
       contextChunks,
-      chatHistory // <-- PASSA O HISTÓRICO AQUI
+      chatHistory,
+      emotionalContext // <-- PASSA CONTEXTO EMOCIONAL AQUI
     );
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -906,6 +1183,20 @@ serve(async (req: Request) => {
     }
 
     console.log("[chat-agent] Resposta da Sofia salva com sucesso");
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 9.5. TRACKING DE ANALYTICS (mensagem enviada)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    await trackEvent(supabase, "message_sent", org_id, convId, {
+      intent: intentData.intent,
+      intent_confidence: intentData.confidence,
+      sentiment: emotionalContext.sentiment,
+      urgency: emotionalContext.urgency,
+      question_length: question.length,
+      answer_length: cleanAnswer.length,
+      rag_chunks_used: contextChunks.length,
+    });
 
     // ─────────────────────────────────────────────────────────────────────────
     // 10. CRIAR LEAD (se metadados foram detectados)
@@ -943,6 +1234,19 @@ serve(async (req: Request) => {
             nome: fullLead.nome,
             tipo_caso: fullLead.tipo_caso,
             temperatura: fullLead.temperatura,
+          });
+
+          // Track evento de lead criado (com contexto enriquecido)
+          await trackEvent(supabase, "lead_created", org_id, convId, {
+            lead_id: leadId,
+            temperatura: fullLead.temperatura,
+            tipo_caso: fullLead.tipo_caso,
+            intent: intentData.intent,
+            sentiment: emotionalContext.sentiment,
+            urgency: emotionalContext.urgency,
+            has_horario_contato: !!leadData.melhor_horario_contato,
+            has_canal_preferido: !!leadData.canal_preferido,
+            has_cidade_uf: !!leadData.cidade_uf,
           });
         } else {
           console.warn("[chat-agent] Metadados de lead detectados mas criação falhou");
