@@ -7,7 +7,7 @@ import { useSofiaChat } from "@/hooks/useSofiaChat";
 import { Bot } from "lucide-react";
 
 export default function Chat() {
-  const { messages, loading, isTyping, sendMessage } = useSofiaChat();
+  const { messages, conversationId, loading, isTyping, sendMessage } = useSofiaChat();
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -85,7 +85,7 @@ export default function Chat() {
           )}
 
           {messages.map((message) => (
-            <ChatMessage key={message.id} message={message} />
+            <ChatMessage key={message.id} message={message} conversationId={conversationId || undefined} />
           ))}
 
           {isTyping && <TypingIndicator />}
