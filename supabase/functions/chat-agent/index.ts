@@ -484,6 +484,104 @@ async function trackEvent(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// FUNÇÃO: scheduleFollowUp (RECUPERAÇÃO DE LEADS)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Agenda um follow-up automático para recuperação de leads.
+ *
+ * Detecta quando um lead quente pode estar abandonando a conversa e
+ * agenda uma mensagem de recuperação para ser enviada posteriormente.
+ *
+ * @param supabase - Cliente Supabase
+ * @param leadId - ID do lead
+ * @param conversationId - ID da conversa
+ * @param orgId - ID da organização
+ * @param delayMinutes - Quantos minutos esperar antes de enviar follow-up
+ * @param abandonmentContext - Contexto emocional e comportamental
+ */
+async function scheduleFollowUp(
+  supabase: ReturnType<typeof createClient>,
+  leadId: string,
+  conversationId: string,
+  orgId: string,
+  delayMinutes: number,
+  abandonmentContext: {
+    sentiment: Sentiment;
+    urgency: Urgency;
+    lastIntent: Intent;
+    messagesCount: number;
+    temperatura: LeadTemperatura;
+  }
+): Promise<void> {
+  try {
+    // Calcula quando o follow-up deve ser enviado
+    const scheduledAt = new Date(Date.now() + delayMinutes * 60 * 1000);
+
+    // Template personalizado baseado no contexto
+    let messageTemplate = "Olá! Notei que nossa conversa foi interrompida. ";
+
+    // Personaliza baseado no sentimento
+    if (abandonmentContext.sentiment === "desperate") {
+      messageTemplate += "Sei que você está passando por um momento difícil e precisa de ajuda urgente. ";
+    } else if (abandonmentContext.sentiment === "frustrated") {
+      messageTemplate += "Entendo que a situação pode ser frustrante. ";
+    } else if (abandonmentContext.sentiment === "hopeful") {
+      messageTemplate += "Vi que você estava interessado em resolver sua questão. ";
+    }
+
+    // Adiciona call-to-action baseado na última intenção
+    if (abandonmentContext.lastIntent === "agendar") {
+      messageTemplate += "Gostaria de agendar uma consulta com nosso advogado especialista? Posso te ajudar com isso agora! 📅";
+    } else if (abandonmentContext.lastIntent === "preco") {
+      messageTemplate += "Ficou com dúvidas sobre valores? Posso esclarecer melhor e apresentar nossas opções de atendimento. 💰";
+    } else if (abandonmentContext.lastIntent === "documentos") {
+      messageTemplate += "Posso te ajudar a entender quais documentos você vai precisar e como organizar tudo. 📄";
+    } else if (abandonmentContext.lastIntent === "urgente") {
+      messageTemplate += "Sua situação é urgente e merece atenção imediata. Vamos resolver isso juntos! 🚨";
+    } else {
+      messageTemplate += "Estou aqui para ajudar você com sua questão previdenciária. Podemos continuar? 💙";
+    }
+
+    // Insere na fila de follow-up
+    const { error } = await supabase.from("follow_up_queue").insert({
+      lead_id: leadId,
+      conversation_id: conversationId,
+      org_id: orgId,
+      scheduled_at: scheduledAt.toISOString(),
+      status: "pending",
+      channel: "whatsapp", // Por enquanto apenas WhatsApp
+      message_template: messageTemplate,
+      message_vars: {}, // Poderia ter variáveis como {{nome}}, {{tipo_caso}}
+      attempts: 0,
+      max_attempts: 3,
+      abandonment_context: {
+        sentiment: abandonmentContext.sentiment,
+        urgency: abandonmentContext.urgency,
+        last_intent: abandonmentContext.lastIntent,
+        messages_count: abandonmentContext.messagesCount,
+        temperatura: abandonmentContext.temperatura,
+        scheduled_for_minutes: delayMinutes,
+      },
+    });
+
+    if (error) {
+      console.error("[chat-agent] Erro ao agendar follow-up:", error);
+    } else {
+      console.log(`[chat-agent] 📆 Follow-up agendado para daqui a ${delayMinutes} minutos`, {
+        lead_id: leadId,
+        scheduled_at: scheduledAt.toISOString(),
+        sentiment: abandonmentContext.sentiment,
+        urgency: abandonmentContext.urgency,
+      });
+    }
+  } catch (error) {
+    // Fail-safe: não quebra o chat se scheduling falhar
+    console.error("[chat-agent] Erro ao agendar follow-up:", error);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // FUNÇÃO: getConversationHistory
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -990,8 +1088,87 @@ Se durante a conversa você perceber que a pessoa demonstrou **INTERESSE CONCRET
 
 O bloco de metadados será removido automaticamente antes de enviar a resposta ao usuário (ele não verá isso).
 
-MANTRA FINAL:
+====================
+🎯 GATILHOS DE CONVERSÃO AVANÇADOS (PROATIVIDADE INTELIGENTE)
+====================
+
+**SITUAÇÃO 1: QUASE-LEAD (3+ mensagens técnicas sem conversão)**
+
+Se você perceber que:
+- A pessoa já fez 3 ou mais perguntas técnicas detalhadas
+- Demonstra interesse claro (está aprofundando o caso)
+- MAS ainda não pediu ajuda profissional nem forneceu dados
+
+ENTÃO, de forma suave e natural, insira um "empurrãozinho estratégico":
+
+Exemplo de gatilho:
+- "Olha... pelo que você já me contou, acho que vale muito a pena um advogado dar uma olhada no seu caso com calma. 🙂"
+- "Já vi algumas situações parecidas em que um detalhe mudou tudo no resultado."
+- "Se quiser, posso organizar pra alguém analisar tudo isso direitinho com você. Quer que eu faça isso?"
+
+**IMPORTANTE:**
+- Use apenas UMA VEZ por conversa (não fique insistindo a cada mensagem)
+- Seja genuína, não forçada
+- Sempre conecte com algo específico que a pessoa contou
+
+**SITUAÇÃO 2: URGÊNCIA E ESCASSEZ NATURAL**
+
+Quando a pessoa demonstrar urgência alta (prazo apertado, situação crítica):
+
+Use gatilhos de escassez/urgência de forma ética:
+- "Nesse tipo de situação, quanto antes você tiver a orientação certa, melhor. ⏰"
+- "Prazo previdenciário é bem sério - se passar, às vezes complica bastante."
+- "O ideal seria você conversar com o advogado ainda essa semana, pra não correr risco."
+
+**NÃO invente prazos falsos.** Use escassez apenas quando for genuína:
+- Prazo de recurso real
+- Risco de perder direitos
+- Janela de oportunidade para regra de transição
+
+**SITUAÇÃO 3: VALIDAÇÃO SOCIAL ESTRATÉGICA**
+
+Quando apropriado, use validação social para reforçar confiança:
+- "Muitas pessoas que já passaram por negativa do INSS conseguiram reverter com acompanhamento."
+- "Já ajudamos vários casos parecidos com o seu - e quando tem fundamento, a chance é boa."
+
+**IMPORTANTE:**
+- Não prometa resultado
+- Use "já ajudamos" ou "já vimos" (coletivo, do escritório)
+- Mantenha o tom realista e honesto
+
+**SITUAÇÃO 4: ANCORAGEM DE VALOR (quando perguntam sobre preço)**
+
+Se a pessoa perguntar sobre valores/honorários:
+
+EVITE respostas evasivas. Em vez disso:
+1. Valide a pergunta ("É super normal querer saber sobre valores, claro! 😊")
+2. Explique que depende da complexidade do caso
+3. Ancore valor positivo:
+   - "No escritório trabalhamos com transparência total - o advogado vai te explicar tudo certinho."
+   - "E o mais importante: você só paga quando tiver tudo claro e concordar com a proposta."
+4. Conduza para agendamento:
+   - "Quer que eu organize pra você conversar direto com eles e tirar essa dúvida?"
+
+**SITUAÇÃO 5: REDUÇÃO DE FRICÇÃO**
+
+Se a pessoa demonstrar interesse mas hesitar:
+
+Reduza barreiras percebidas:
+- "É só uma conversa inicial, sem compromisso. 🙂"
+- "O advogado vai explicar tudo primeiro - você decide depois com calma."
+- "Não tem nenhum custo pra essa primeira análise - a gente vê se faz sentido pra você."
+
+**IMPORTANTE:**
+- Só use se for verdade no modelo de negócio do escritório
+- Não invente benefícios ou gratuidades que não existem
+
+====================
+MANTRA FINAL
+====================
+
 Você não responde apenas dúvidas. Você cuida de pessoas em momentos sensíveis da vida, usando empatia, estratégia e conhecimento previdenciário para aproximar o cliente da solução – muitas vezes, conectando com o advogado certo no momento certo.
+
+**Conversão não é manipulação - é SERVIR bem no momento certo.**
 `;
 
   // Concatena o prompt base com os boosts emocionais (se aplicável)
@@ -1248,6 +1425,48 @@ serve(async (req: Request) => {
             has_canal_preferido: !!leadData.canal_preferido,
             has_cidade_uf: !!leadData.cidade_uf,
           });
+
+          // ─────────────────────────────────────────────────────────────────────
+          // AGENDAR FOLLOW-UP AUTOMÁTICO PARA LEADS QUENTES
+          // ─────────────────────────────────────────────────────────────────────
+          // Leads quentes têm alta probabilidade de conversão, então agendamos
+          // um follow-up para caso eles abandonem a conversa
+          if (fullLead.temperatura === "quente") {
+            const messagesCount = chatHistory.length + 2; // +2 para incluir a pergunta e resposta atual
+
+            // Determina delay baseado na urgência
+            let delayMinutes = 10; // Default: 10 minutos
+            if (emotionalContext.urgency === "high") {
+              delayMinutes = 5; // Urgência alta: follow-up mais rápido
+            } else if (emotionalContext.urgency === "low") {
+              delayMinutes = 15; // Urgência baixa: pode esperar um pouco mais
+            }
+
+            await scheduleFollowUp(
+              supabase,
+              leadId,
+              convId,
+              org_id,
+              delayMinutes,
+              {
+                sentiment: emotionalContext.sentiment,
+                urgency: emotionalContext.urgency,
+                lastIntent: intentData.intent,
+                messagesCount,
+                temperatura: fullLead.temperatura,
+              }
+            );
+
+            // Track evento de follow-up agendado
+            await trackEvent(supabase, "follow_up_scheduled", org_id, convId, {
+              lead_id: leadId,
+              temperatura: fullLead.temperatura,
+              delay_minutes: delayMinutes,
+              sentiment: emotionalContext.sentiment,
+              urgency: emotionalContext.urgency,
+              intent: intentData.intent,
+            });
+          }
         } else {
           console.warn("[chat-agent] Metadados de lead detectados mas criação falhou");
         }

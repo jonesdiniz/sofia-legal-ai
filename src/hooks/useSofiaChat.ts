@@ -200,6 +200,7 @@ export function useSofiaChat() {
 
   return {
     messages,
+    conversationId,
     loading,
     isTyping,
     sendMessage,
