@@ -19,6 +19,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import OpenAI from "https://deno.land/x/openai@v4.20.1/mod.ts";
+import { getQuickResponse, shouldSkipRAG } from "./quick-responses.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CORS / RESPOSTA
@@ -732,7 +733,7 @@ async function searchSimilarChunks(
       in_org_id: orgId,
       query_embedding: embedding,
       match_threshold: 1.0,
-      match_count: 5,
+      match_count: 10, // Busca 10 para depois rerankar e pegar top 5
       min_content_length: 30,
     });
 
@@ -750,6 +751,189 @@ async function searchSimilarChunks(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// RAG com RERANKING INTELIGENTE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Reordena chunks usando GPT-4o-mini como cross-encoder.
+ * Melhora significativamente a relevância dos chunks selecionados.
+ *
+ * @param chunks - Chunks retornados pela busca semântica
+ * @param question - Pergunta do usuário
+ * @param openai - Cliente OpenAI
+ * @returns Chunks reordenados do mais relevante ao menos relevante
+ */
+async function rerankChunks(
+  chunks: any[],
+  question: string,
+  openai: OpenAI
+): Promise<any[]> {
+  // Se poucos chunks, não vale a pena rerankar
+  if (chunks.length <= 3) {
+    console.log("[chat-agent] Poucos chunks (<= 3), pulando reranking");
+    return chunks;
+  }
+
+  try {
+    console.log(`[chat-agent] Rerankando ${chunks.length} chunks...`);
+
+    // Monta prompt de reranking
+    const chunksText = chunks
+      .map((c, i) => `[${i}] ${c.content.substring(0, 250)}...`)
+      .join("\n\n");
+
+    const rerankPrompt = `Pergunta: "${question}"
+
+Ordene os trechos abaixo do MAIS RELEVANTE para o MENOS RELEVANTE para responder a pergunta.
+Considere:
+- Relevância direta ao tópico perguntado
+- Informações práticas e acionáveis
+- Precisão técnica
+
+Trechos:
+${chunksText}
+
+Responda APENAS com os índices ordenados, separados por vírgula (ex: 2,0,4,1,3):`;
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: rerankPrompt }],
+      temperature: 0,
+      max_tokens: 50,
+    });
+
+    const orderStr = response.choices[0]?.message?.content?.trim();
+    if (!orderStr) {
+      console.warn("[chat-agent] Reranking falhou, usando ordem original");
+      return chunks;
+    }
+
+    // Parse da ordem
+    const order = orderStr
+      .split(",")
+      .map(n => parseInt(n.trim()))
+      .filter(n => !isNaN(n) && n >= 0 && n < chunks.length);
+
+    if (order.length === 0) {
+      console.warn("[chat-agent] Ordem inválida do reranking, usando ordem original");
+      return chunks;
+    }
+
+    // Reordena chunks
+    const rerankedChunks = order.map(i => chunks[i]).filter(Boolean);
+
+    console.log("[chat-agent] Reranking concluído:", {
+      original_order: chunks.map((_, i) => i),
+      new_order: order,
+      reranked_count: rerankedChunks.length,
+    });
+
+    return rerankedChunks;
+  } catch (error) {
+    console.error("[chat-agent] Erro ao rerankar chunks:", error);
+    return chunks; // Fallback para ordem original
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DETECÇÃO DE RISCO DE ABANDONO PROATIVO
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Detecta risco de abandono DURANTE a conversa e retorna ação recomendada.
+ *
+ * @param supabase - Cliente Supabase
+ * @param conversationId - ID da conversa
+ * @param orgId - ID da organização
+ * @returns Análise de risco com ação recomendada
+ */
+async function detectAbandonmentRisk(
+  supabase: any,
+  conversationId: string,
+  orgId: string
+): Promise<{
+  risk_level: "high" | "medium" | "low";
+  risk_score: number;
+  triggers: string[];
+  recommended_action: "offer_scheduling" | "reduce_friction" | "continue_normal";
+} | null> {
+  try {
+    console.log("[chat-agent] Detectando risco de abandono...");
+
+    // Chama função do banco que analisa padrões comportamentais
+    const { data, error } = await supabase.rpc("detect_abandonment_risk", {
+      conv_id: conversationId,
+    });
+
+    if (error) {
+      console.error("[chat-agent] Erro ao detectar risco de abandono:", error);
+      return null;
+    }
+
+    if (!data || data.length === 0) {
+      return null;
+    }
+
+    const riskData = data[0];
+
+    console.log("[chat-agent] Risco de abandono detectado:", {
+      risk_level: riskData.risk_level,
+      risk_score: riskData.risk_score,
+      triggers: riskData.triggers,
+    });
+
+    // Salva análise no banco para tracking
+    await supabase.rpc("save_abandonment_risk_analysis", {
+      conv_id: conversationId,
+      o_id: orgId,
+      r_level: riskData.risk_level,
+      r_score: riskData.risk_score,
+      trigs: riskData.triggers,
+      ctx: {},
+      action: riskData.recommended_action,
+    });
+
+    return {
+      risk_level: riskData.risk_level,
+      risk_score: riskData.risk_score,
+      triggers: Array.isArray(riskData.triggers) ? riskData.triggers : [],
+      recommended_action: riskData.recommended_action,
+    };
+  } catch (error) {
+    console.error("[chat-agent] Erro inesperado ao detectar abandono:", error);
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ATUALIZAÇÃO DE LEAD SCORE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Atualiza o score de qualidade de um lead após criação/atualização.
+ *
+ * @param supabase - Cliente Supabase
+ * @param leadId - ID do lead
+ */
+async function updateLeadScore(
+  supabase: any,
+  leadId: string
+): Promise<void> {
+  try {
+    console.log("[chat-agent] Atualizando score do lead:", leadId);
+
+    await supabase.rpc("update_lead_score", {
+      lead_id: leadId,
+    });
+
+    console.log("[chat-agent] Score do lead atualizado com sucesso");
+  } catch (error) {
+    console.error("[chat-agent] Erro ao atualizar score do lead:", error);
+    // Fail-safe: não quebra o fluxo
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // callChatModel – Sofia com personalidade COMPLETA + histórico
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -759,6 +943,12 @@ async function callChatModel(
   contextChunks: any[],
   chatHistory: { role: "user" | "assistant"; content: string }[] = [],
   emotionalContext?: EmotionalContext,
+  abandonmentRisk?: {
+    risk_level: "high" | "medium" | "low";
+    risk_score: number;
+    triggers: string[];
+    recommended_action: string;
+  },
 ) {
   const contextText =
     contextChunks.length > 0
@@ -786,6 +976,25 @@ async function callChatModel(
     medium: "\n\n⏱️ URGÊNCIA MÉDIA: A pessoa tem interesse claro. Balance explicação com ação. Não precisa apressar mas também não prolongar demais.",
     low: "",
   }[emotionalContext.urgency] || "" : "";
+
+  // Boost de risco de abandono (PROATIVO)
+  const abandonmentBoost = abandonmentRisk ? {
+    high: `\n\n🚨 ALERTA DE ABANDONO IMINENTE (Score: ${abandonmentRisk.risk_score}/100)
+Sinais detectados: ${abandonmentRisk.triggers.join(", ")}
+
+AÇÃO RECOMENDADA: ${abandonmentRisk.recommended_action === "offer_scheduling" ? "OFERECER AGENDAMENTO DIRETO" : abandonmentRisk.recommended_action === "reduce_friction" ? "REDUZIR FRICÇÃO" : "continuar normal"}
+
+${abandonmentRisk.recommended_action === "offer_scheduling" ?
+  "A pessoa está prestes a abandonar! INTERVENHA AGORA:\n- Reconheça o interesse dela\n- Ofereça agendamento de forma DIRETA e IMEDIATA\n- Use linguagem que reduza barreiras: 'É rapidinho', 'Só preciso de seu nome e WhatsApp', 'Vou organizar tudo pra você'\n- Exemplo: 'Olha, pelo que você já me contou, acho que vale muito a pena um advogado dar uma olhada no seu caso com calma. 🙂 Quer que eu já organize isso pra você? É super rápido!'"
+  : abandonmentRisk.recommended_action === "reduce_friction" ?
+  "A pessoa está hesitante. REDUZA BARREIRAS:\n- Use frases como 'É só uma conversa inicial, sem compromisso'\n- 'O advogado vai explicar tudo primeiro - você decide depois com calma'\n- Reforce valor: 'Já ajudamos vários casos parecidos'"
+  : ""
+}`,
+    medium: `\n\n⚠️ ATENÇÃO: Risco moderado de abandono (Score: ${abandonmentRisk.risk_score}/100)
+Sinais: ${abandonmentRisk.triggers.join(", ")}
+Mantenha engajamento alto. Se apropriado, sugira próximo passo concreto.`,
+    low: "",
+  }[abandonmentRisk.risk_level] || "" : "";
 
   const baseSystemPrompt = `
 Você é a Sofia, assistente jurídica especializada em Direito Previdenciário, atuando em um escritório de advocacia que atende com profundidade humana e excelência técnica.
@@ -1171,14 +1380,16 @@ Você não responde apenas dúvidas. Você cuida de pessoas em momentos sensíve
 **Conversão não é manipulação - é SERVIR bem no momento certo.**
 `;
 
-  // Concatena o prompt base com os boosts emocionais (se aplicável)
-  const systemPrompt = baseSystemPrompt + emotionalBoost + urgencyBoost;
+  // Concatena o prompt base com os boosts (se aplicável)
+  const systemPrompt = baseSystemPrompt + emotionalBoost + urgencyBoost + abandonmentBoost;
 
   console.log("[chat-agent] SystemPrompt gerado com:", {
     has_emotional_boost: !!emotionalBoost,
     has_urgency_boost: !!urgencyBoost,
+    has_abandonment_boost: !!abandonmentBoost,
     sentiment: emotionalContext?.sentiment,
     urgency: emotionalContext?.urgency,
+    abandonment_risk: abandonmentRisk?.risk_level,
   });
 
   const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
@@ -1311,19 +1522,80 @@ serve(async (req: Request) => {
     });
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 7. RAG (Retrieval Augmented Generation)
+    // 6.5. VERIFICAR QUICK RESPONSE (Otimização de Latência e Custo)
     // ─────────────────────────────────────────────────────────────────────────
 
-    // Para saudações simples, pular RAG (otimização)
-    let contextChunks: any[] = [];
-    if (intentData.intent !== "saudacao" || intentData.confidence < 0.8) {
-      contextChunks = await searchSimilarChunks(supabase, openai, question, org_id);
-    } else {
-      console.log("[chat-agent] Saudação detectada - pulando RAG");
+    const quickResponse = getQuickResponse(question, intentData.intent, intentData.confidence);
+
+    if (quickResponse) {
+      console.log("[chat-agent] 🚀 Quick response encontrada - usando resposta pré-otimizada");
+
+      // Usa resposta rápida ao invés de chamar GPT-4o
+      const answer = quickResponse.response;
+
+      // Salva resposta
+      await supabase.from("messages").insert({
+        org_id,
+        conversation_id: convId,
+        actor: "sofia",
+        content: answer,
+        created_at: new Date().toISOString(),
+      });
+
+      // Track analytics
+      await trackEvent(supabase, "message_sent", org_id, convId, {
+        intent: intentData.intent,
+        intent_confidence: intentData.confidence,
+        sentiment: emotionalContext.sentiment,
+        urgency: emotionalContext.urgency,
+        question_length: question.length,
+        answer_length: answer.length,
+        rag_chunks_used: 0,
+        quick_response_used: true,
+      });
+
+      // Retorna resposta imediatamente
+      return jsonResponse({
+        answer,
+        conversation_id: convId,
+        context_used: [],
+      });
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 8. CHAMAR MODELO DE IA COM HISTÓRICO + CONTEXTO EMOCIONAL
+    // 7. RAG (Retrieval Augmented Generation) com RERANKING
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Verifica se deve pular RAG (quick responses ou saudações)
+    let contextChunks: any[] = [];
+    const skipRAG = shouldSkipRAG(question, intentData.intent, intentData.confidence);
+
+    if (!skipRAG) {
+      // Busca chunks
+      contextChunks = await searchSimilarChunks(supabase, openai, question, org_id);
+
+      // Rerank se houver múltiplos chunks
+      if (contextChunks.length > 3) {
+        contextChunks = await rerankChunks(contextChunks, question, openai);
+        // Pega apenas top 5 rerankeados
+        contextChunks = contextChunks.slice(0, 5);
+      }
+    } else {
+      console.log("[chat-agent] RAG pulado (quick response ou saudação)");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 7.5. DETECÇÃO PROATIVA DE RISCO DE ABANDONO
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const abandonmentRisk = await detectAbandonmentRisk(supabase, convId, org_id);
+
+    if (abandonmentRisk && abandonmentRisk.risk_level !== "low") {
+      console.log(`[chat-agent] ⚠️ Risco de abandono detectado: ${abandonmentRisk.risk_level} (score: ${abandonmentRisk.risk_score})`);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 8. CHAMAR MODELO DE IA COM HISTÓRICO + CONTEXTOS
     // ─────────────────────────────────────────────────────────────────────────
 
     const answer = await callChatModel(
@@ -1331,7 +1603,8 @@ serve(async (req: Request) => {
       question,
       contextChunks,
       chatHistory,
-      emotionalContext // <-- PASSA CONTEXTO EMOCIONAL AQUI
+      emotionalContext,
+      abandonmentRisk || undefined // <-- PASSA RISCO DE ABANDONO
     );
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1425,6 +1698,12 @@ serve(async (req: Request) => {
             has_canal_preferido: !!leadData.canal_preferido,
             has_cidade_uf: !!leadData.cidade_uf,
           });
+
+          // ─────────────────────────────────────────────────────────────────────
+          // ATUALIZAR SCORE DO LEAD (Sistema de Qualificação Automática)
+          // ─────────────────────────────────────────────────────────────────────
+          // Calcula score baseado em: engagement, urgency, data_quality, intent, timing
+          await updateLeadScore(supabase, leadId);
 
           // ─────────────────────────────────────────────────────────────────────
           // AGENDAR FOLLOW-UP AUTOMÁTICO PARA LEADS QUENTES
