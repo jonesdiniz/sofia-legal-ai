@@ -6,11 +6,13 @@
  * Função Edge do Supabase que implementa o chat da Sofia com:
  * - RAG (Retrieval Augmented Generation) usando embeddings
  * - Memória de conversa (curto prazo) baseada em conversation_id
- * - Integração com OpenAI GPT-4o
+ * - LLM Híbrido: Gemini 2.0 Flash (chat) + OpenAI (embeddings apenas)
+ * - Suporte multi-área: Previdenciário, Cível, Bancário
  * - Persistência de mensagens no banco de dados
  *
  * VARIÁVEIS DE AMBIENTE NECESSÁRIAS:
- * - OPENAI_API_KEY: Chave da API da OpenAI
+ * - GEMINI_API_KEY: Chave da API do Google Gemini (chat, análises)
+ * - OPENAI_API_KEY: Chave da API da OpenAI (apenas embeddings)
  * - SUPABASE_URL: URL do projeto Supabase
  * - SUPABASE_SERVICE_ROLE_KEY: Service role key para acesso ao banco
  * ═══════════════════════════════════════════════════════════════════════════
@@ -22,14 +24,150 @@ import OpenAI from "https://deno.land/x/openai@v4.20.1/mod.ts";
 import { getQuickResponse, shouldSkipRAG } from "./quick-responses.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════
+// GEMINI 2.0 FLASH - Cliente REST nativo
+// ═══════════════════════════════════════════════════════════════════════════
+
+const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL_FALLBACK = "gemini-1.5-flash"; // fallback if 2.0 is rate-limited
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+
+/** Erro tipado para 429 / rate limit / quota */
+class GeminiQuotaError extends Error {
+  public readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "GeminiQuotaError";
+    this.status = status;
+  }
+}
+
+/**
+ * Chama o Gemini via REST API nativa (uma única tentativa).
+ * Usado por callGeminiWithRetry. Não usar diretamente.
+ */
+async function callGeminiOnce(
+  apiKey: string,
+  model: string,
+  systemInstruction: string,
+  contents: { role: "user" | "model"; parts: { text: string }[] }[],
+  options: { temperature?: number; maxOutputTokens?: number } = {}
+): Promise<string> {
+  const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+
+  const body: Record<string, any> = {
+    contents,
+    generationConfig: {
+      temperature: options.temperature ?? 0.7,
+      maxOutputTokens: options.maxOutputTokens ?? 800,
+    },
+  };
+
+  if (systemInstruction) {
+    body.systemInstruction = { parts: [{ text: systemInstruction }] };
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`[chat-agent] Gemini API error (${model}):`, response.status, errorText.slice(0, 300));
+    if (response.status === 429 || response.status === 503) {
+      throw new GeminiQuotaError(`Gemini API ${response.status} (${model})`, response.status);
+    }
+    throw new Error(`Gemini API error: ${response.status} (${model})`);
+  }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (!text) {
+    console.error("[chat-agent] Gemini retornou resposta vazia:", JSON.stringify(data).slice(0, 400));
+    throw new Error("Gemini retornou resposta vazia");
+  }
+
+  return text;
+}
+
+/**
+ * Chama Gemini com retry exponencial + fallback automático para modelo menor quando 429/503.
+ * Estratégia:
+ *   1. Tenta gemini-2.0-flash (até 2 retries com backoff 500ms, 1500ms)
+ *   2. Se ainda 429/503, tenta gemini-1.5-flash (1 tentativa)
+ *   3. Se falhar tudo, relança GeminiQuotaError para o caller decidir o fallback UX
+ */
+async function callGeminiWithRetry(
+  apiKey: string,
+  systemInstruction: string,
+  contents: { role: "user" | "model"; parts: { text: string }[] }[],
+  options: { temperature?: number; maxOutputTokens?: number } = {}
+): Promise<string> {
+  const backoffs = [0, 500, 1500];
+  let lastError: unknown;
+
+  for (let i = 0; i < backoffs.length; i++) {
+    if (backoffs[i] > 0) {
+      await new Promise((r) => setTimeout(r, backoffs[i]));
+    }
+    try {
+      return await callGeminiOnce(apiKey, GEMINI_MODEL, systemInstruction, contents, options);
+    } catch (err) {
+      lastError = err;
+      if (err instanceof GeminiQuotaError) {
+        console.warn(`[chat-agent] Gemini ${GEMINI_MODEL} rate-limited (attempt ${i + 1})`);
+        continue;
+      }
+      // erro não-quota, não faz sentido retry
+      throw err;
+    }
+  }
+
+  // Tenta modelo fallback menor
+  try {
+    console.warn(`[chat-agent] Tentando fallback para ${GEMINI_MODEL_FALLBACK}`);
+    return await callGeminiOnce(apiKey, GEMINI_MODEL_FALLBACK, systemInstruction, contents, options);
+  } catch (err) {
+    console.error("[chat-agent] Fallback Gemini 1.5 também falhou:", err);
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+}
+
+/** Compat: alias legado (mantém API usada no restante do arquivo). */
+async function callGemini(
+  apiKey: string,
+  systemInstruction: string,
+  contents: { role: "user" | "model"; parts: { text: string }[] }[],
+  options: { temperature?: number; maxOutputTokens?: number } = {}
+): Promise<string> {
+  return callGeminiWithRetry(apiKey, systemInstruction, contents, options);
+}
+
+// Tipo para área jurídica
+type AreaJuridica = "previdenciario" | "civil" | "bancario" | "geral";
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CORS / RESPOSTA
 // ═══════════════════════════════════════════════════════════════════════════
+
+interface BlogHint {
+  title: string;
+  slug: string;
+  excerpt?: string;
+  area?: string;
+  category?: string;
+}
 
 interface RequestPayload {
   org_id: string;
   question: string;
   client_id?: string;
   conversation_id?: string;
+  area?: AreaJuridica;
+  /** Posts do blog relevantes para a área/rota atual (injetado pelo frontend). */
+  blog_hints?: BlogHint[];
 }
 
 interface ContextChunk {
@@ -108,8 +246,17 @@ interface IntentClassification {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function buildCorsHeaders(): HeadersInit {
+  // Lista de origens permitidas
+  const allowedOrigins = [
+    "https://www.buenodiniz.com.br",
+    "https://buenodiniz.com.br",
+    "http://localhost:5173", // dev local
+    "http://localhost:5174", // dev local alternativo
+    "http://localhost:8080", // dev local alternativo
+  ];
+
   return {
-    "Access-Control-Allow-Origin": "*", // em produção, substituir pelo domínio do site
+    "Access-Control-Allow-Origin": "*", // Supabase Edge Functions gerenciam CORS internamente
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   };
@@ -123,6 +270,29 @@ function jsonResponse(data: unknown, status = 200) {
       ...buildCorsHeaders(),
     },
   });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FALLBACK HUMANIZADO (quando Gemini está indisponível)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Gera uma resposta acolhedora e útil quando o Gemini falha.
+ * NÃO diz "probleminha técnico" — pega o usuário pela mão e direciona ao WhatsApp.
+ */
+function buildHumanFallback(area: AreaJuridica, _question: string): string {
+  const areaLabel: Record<AreaJuridica, string> = {
+    previdenciario: "área previdenciária (aposentadoria, INSS, benefícios)",
+    civil: "área cível (família, inventário, contratos)",
+    bancario: "área bancária (juros, Pix, negativação)",
+    geral: "nossas áreas de atuação",
+  };
+
+  return (
+    `Poxa, peço desculpa — estou com um pequeno atraso aqui no meu sistema para te responder com toda a atenção que seu caso merece. 💛\n\n` +
+    `Mas não quero te deixar esperando. Pelo que você me contou, vale muito a pena um advogado do escritório dar uma olhada com calma no seu caso da ${areaLabel[area]}.\n\n` +
+    `Se quiser, posso organizar isso pra você agora mesmo. Clica no botão de WhatsApp abaixo e eu já encaminho sua mensagem pra equipe. 🙂`
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -281,7 +451,126 @@ function extractLeadMetadata(answer: string): {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// FUNÇÃO: analyzeEmotionalContext (INTELIGÊNCIA EMOCIONAL)
+// FUNÇÃO: analyzeMessageUnified (EMOTIONAL + INTENT em 1 chamada)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Une análise emocional + classificação de intent em UMA ÚNICA chamada Gemini.
+ * Reduz consumo de API em 50%.
+ *
+ * Se regex rápido detectar intent óbvia (saudação, agendamento, preço),
+ * pula a chamada ao LLM por completo.
+ */
+async function analyzeMessageUnified(
+  geminiApiKey: string,
+  question: string,
+  chatHistory: ChatHistoryMessage[]
+): Promise<{ emotional: EmotionalContext; intent: IntentClassification }> {
+  // 1) Quick regex-based intent (evita LLM completamente)
+  const quickPatterns: Record<Intent, RegExp> = {
+    saudacao: /^(oi|olá|ola|bom dia|boa tarde|boa noite|opa|e aí|eai|tchau|xau|valeu|obrigad[ao]|brigad[ao])\b/i,
+    agendar: /agendar|marcar\s+(consulta|horário|hor[aá]rio)|falar com\s+(advogado|algu[eé]m)|conversar com|quero falar/i,
+    preco: /quanto\s+custa|valor|pre[çc]o|honor[aá]rio|quanto\s+(custa|cobra|cobram)|quanto\s+[ée]/i,
+    documentos: /\b(documentos?|papéis|que\s+levar|preciso\s+levar|quais?\s+documentos?)\b/i,
+    urgente: /urgente|preciso\s+(agora|j[aá]|imediato)|n[ãa]o\s+aguento|desesperado|cr[ií]tico/i,
+    duvida_tecnica: /.+/,
+    unknown: /.+/,
+  };
+
+  let quickIntent: Intent | null = null;
+  for (const [intent, pattern] of Object.entries(quickPatterns)) {
+    if (intent !== "duvida_tecnica" && intent !== "unknown" && pattern.test(question)) {
+      quickIntent = intent as Intent;
+      break;
+    }
+  }
+
+  // Se intent = saudação pura e mensagem curta, pula LLM totalmente
+  if (quickIntent === "saudacao" && question.trim().length < 40) {
+    return {
+      emotional: { sentiment: "neutral", urgency: "low", emotionalContext: "" },
+      intent: { intent: "saudacao", confidence: 0.95 },
+    };
+  }
+
+  // 2) Chamada única combinada
+  try {
+    const lastMessages = chatHistory
+      .slice(-3)
+      .map((m) => `${m.role === "user" ? "Usuário" : "Sofia"}: ${m.content}`)
+      .join("\n");
+
+    const prompt = `Analise esta mensagem de um cliente em chat de escritório de advocacia.
+
+HISTÓRICO RECENTE:
+${lastMessages || "Nenhum"}
+
+MENSAGEM ATUAL:
+"${question}"
+
+Retorne APENAS JSON válido (sem markdown) no formato:
+{
+  "sentiment": "desperate" | "frustrated" | "hopeful" | "neutral",
+  "urgency": "high" | "medium" | "low",
+  "intent": "agendar" | "preco" | "documentos" | "urgente" | "duvida_tecnica" | "saudacao",
+  "confidence": 0.0-1.0,
+  "emotionalContext": "frase curta descrevendo estado emocional"
+}
+
+Critérios de sentimento:
+- desperate: desespero, "não aguento", pede ajuda urgente pessoal
+- frustrated: raiva do INSS/banco/sistema, burocracia, negativas
+- hopeful: engajado, quer resolver, otimista
+- neutral: perguntando sem carga emocional
+
+Critérios de intent:
+- agendar: quer falar com advogado, marcar consulta
+- preco: pergunta valores/honorários
+- documentos: pergunta sobre documentos
+- urgente: situação crítica, prazo apertado
+- duvida_tecnica: dúvida jurídica genérica
+- saudacao: apenas cumprimenta`;
+
+    const responseText = await callGemini(
+      geminiApiKey,
+      "Você analisa mensagens. Retorne APENAS JSON válido, sem markdown.",
+      [{ role: "user", parts: [{ text: prompt }] }],
+      { temperature: 0.2, maxOutputTokens: 180 }
+    );
+
+    const cleanJson = responseText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    const parsed = JSON.parse(cleanJson);
+
+    const emotional: EmotionalContext = {
+      sentiment: parsed.sentiment || "neutral",
+      urgency: parsed.urgency || "medium",
+      emotionalContext: parsed.emotionalContext || "",
+    };
+    const intent: IntentClassification = {
+      intent: (parsed.intent as Intent) || quickIntent || "duvida_tecnica",
+      confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.7,
+    };
+
+    console.log("[chat-agent] Análise unificada:", {
+      sentiment: emotional.sentiment,
+      urgency: emotional.urgency,
+      intent: intent.intent,
+      confidence: intent.confidence,
+      usedQuickIntent: !!quickIntent,
+    });
+
+    return { emotional, intent };
+  } catch (err) {
+    console.error("[chat-agent] Falha na análise unificada, usando fallback:", err);
+    return {
+      emotional: { sentiment: "neutral", urgency: "medium", emotionalContext: "" },
+      intent: { intent: quickIntent || "duvida_tecnica", confidence: quickIntent ? 0.85 : 0.5 },
+    };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNÇÃO: analyzeEmotionalContext (LEGADO - mantido para compat)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
@@ -299,7 +588,7 @@ function extractLeadMetadata(answer: string): {
  * @returns Contexto emocional estruturado
  */
 async function analyzeEmotionalContext(
-  openai: OpenAI,
+  geminiApiKey: string,
   question: string,
   chatHistory: ChatHistoryMessage[]
 ): Promise<EmotionalContext> {
@@ -309,7 +598,7 @@ async function analyzeEmotionalContext(
       .map(m => `${m.role === "user" ? "Usuário" : "Sofia"}: ${m.content}`)
       .join("\n");
 
-    const prompt = `Analise o sentimento e urgência desta conversa sobre direito previdenciário:
+    const prompt = `Analise o sentimento e urgência desta conversa de um escritório de advocacia:
 
 HISTÓRICO RECENTE:
 ${lastMessages || "Nenhum histórico"}
@@ -326,7 +615,7 @@ Responda APENAS com JSON válido no formato:
 
 Critérios:
 - desperate: desespero, angústia, "não aguento mais", "preciso urgente"
-- frustrated: frustração com INSS/sistema, negativas, burocracia
+- frustrated: frustração com INSS/sistema/banco, negativas, burocracia
 - hopeful: esperançoso, engajado, interessado em resolver
 - neutral: apenas perguntando, sem carga emocional forte
 
@@ -334,16 +623,18 @@ Critérios:
 - medium: interesse claro mas não crítico
 - low: curiosidade, exploração`;
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.3,
-      max_tokens: 150,
-    });
+    const responseText = await callGemini(
+      geminiApiKey,
+      "Você é um analisador de sentimento. Responda APENAS com JSON válido, sem markdown.",
+      [{ role: "user", parts: [{ text: prompt }] }],
+      { temperature: 0.3, maxOutputTokens: 150 }
+    );
 
-    const result = JSON.parse(response.choices[0]?.message?.content || "{}");
+    // Remove possíveis backticks de markdown que o Gemini pode adicionar
+    const cleanJson = responseText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    const result = JSON.parse(cleanJson);
 
-    console.log("[chat-agent] Análise emocional:", {
+    console.log("[chat-agent] Análise emocional (Gemini):", {
       sentiment: result.sentiment,
       urgency: result.urgency,
     });
@@ -355,7 +646,6 @@ Critérios:
     };
   } catch (error) {
     console.error("[chat-agent] Erro ao analisar contexto emocional:", error);
-    // Fallback seguro
     return {
       sentiment: "neutral",
       urgency: "medium",
@@ -386,7 +676,7 @@ Critérios:
  * @returns Intent e confiança (0-1)
  */
 async function classifyIntent(
-  openai: OpenAI,
+  geminiApiKey: string,
   question: string
 ): Promise<IntentClassification> {
   try {
@@ -409,8 +699,8 @@ async function classifyIntent(
       }
     }
 
-    // Se não bateu nenhum padrão óbvio, usa LLM para análise mais sofisticada
-    const prompt = `Classifique a intenção desta mensagem em um chat de advocacia previdenciária:
+    // Se não bateu nenhum padrão óbvio, usa Gemini para análise mais sofisticada
+    const prompt = `Classifique a intenção desta mensagem em um chat de escritório de advocacia:
 
 "${question}"
 
@@ -419,24 +709,23 @@ Intenções possíveis:
 - preco: quer saber valores, custos, honorários
 - documentos: pergunta sobre documentos necessários
 - urgente: situação crítica, precisa resolver já
-- duvida_tecnica: dúvida sobre INSS, aposentadoria, benefícios
+- duvida_tecnica: dúvida sobre direito (previdenciário, cível, bancário)
 - saudacao: apenas cumprimentando
 
 Responda APENAS com JSON válido:
 {"intent": "...", "confidence": 0.0-1.0}`;
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.2,
-      max_tokens: 50,
-    });
-
-    const result = JSON.parse(
-      response.choices[0]?.message?.content || '{"intent":"duvida_tecnica","confidence":0.5}'
+    const responseText = await callGemini(
+      geminiApiKey,
+      "Você é um classificador de intenção. Responda APENAS com JSON válido, sem markdown.",
+      [{ role: "user", parts: [{ text: prompt }] }],
+      { temperature: 0.2, maxOutputTokens: 50 }
     );
 
-    console.log("[chat-agent] Intent detectada (LLM):", result.intent);
+    const cleanJson = responseText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    const result = JSON.parse(cleanJson);
+
+    console.log("[chat-agent] Intent detectada (Gemini):", result.intent);
 
     return {
       intent: result.intent || "duvida_tecnica",
@@ -444,7 +733,7 @@ Responda APENAS com JSON válido:
     };
   } catch (error) {
     console.error("[chat-agent] Erro ao classificar intent:", error);
-    return { intent: "duvida_tecnica", confidence: 0.5 }; // Fallback seguro
+    return { intent: "duvida_tecnica", confidence: 0.5 };
   }
 }
 
@@ -766,7 +1055,7 @@ async function searchSimilarChunks(
 async function rerankChunks(
   chunks: any[],
   question: string,
-  openai: OpenAI
+  geminiApiKey: string
 ): Promise<any[]> {
   // Se poucos chunks, não vale a pena rerankar
   if (chunks.length <= 3) {
@@ -775,7 +1064,7 @@ async function rerankChunks(
   }
 
   try {
-    console.log(`[chat-agent] Rerankando ${chunks.length} chunks...`);
+    console.log(`[chat-agent] Rerankando ${chunks.length} chunks (Gemini)...`);
 
     // Monta prompt de reranking
     const chunksText = chunks
@@ -795,14 +1084,14 @@ ${chunksText}
 
 Responda APENAS com os índices ordenados, separados por vírgula (ex: 2,0,4,1,3):`;
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: rerankPrompt }],
-      temperature: 0,
-      max_tokens: 50,
-    });
+    const responseText = await callGemini(
+      geminiApiKey,
+      "Responda APENAS com índices numéricos separados por vírgula, sem explicação.",
+      [{ role: "user", parts: [{ text: rerankPrompt }] }],
+      { temperature: 0, maxOutputTokens: 50 }
+    );
 
-    const orderStr = response.choices[0]?.message?.content?.trim();
+    const orderStr = responseText.trim();
     if (!orderStr) {
       console.warn("[chat-agent] Reranking falhou, usando ordem original");
       return chunks;
@@ -822,7 +1111,7 @@ Responda APENAS com os índices ordenados, separados por vírgula (ex: 2,0,4,1,3
     // Reordena chunks
     const rerankedChunks = order.map(i => chunks[i]).filter(Boolean);
 
-    console.log("[chat-agent] Reranking concluído:", {
+    console.log("[chat-agent] Reranking concluído (Gemini):", {
       original_order: chunks.map((_, i) => i),
       new_order: order,
       reranked_count: rerankedChunks.length,
@@ -938,7 +1227,7 @@ async function updateLeadScore(
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function callChatModel(
-  openai: OpenAI,
+  geminiApiKey: string,
   question: string,
   contextChunks: any[],
   chatHistory: { role: "user" | "assistant"; content: string }[] = [],
@@ -949,6 +1238,8 @@ async function callChatModel(
     triggers: string[];
     recommended_action: string;
   },
+  area: AreaJuridica = "geral",
+  blogHints: BlogHint[] = [],
 ) {
   const contextText =
     contextChunks.length > 0
@@ -996,13 +1287,74 @@ Mantenha engajamento alto. Se apropriado, sugira próximo passo concreto.`,
     low: "",
   }[abandonmentRisk.risk_level] || "" : "";
 
-  const baseSystemPrompt = `
-Você é a Sofia, assistente jurídica especializada em Direito Previdenciário, atuando em um escritório de advocacia que atende com profundidade humana e excelência técnica.
+  // ═══════════════════════════════════════════════════════════════════════
+  // Bloco de sugestões do blog (injetado se o frontend enviou blog_hints)
+  // ═══════════════════════════════════════════════════════════════════════
+  const blogSection =
+    blogHints && blogHints.length > 0
+      ? `
+====================
+📚 CONTEÚDO DO BLOG JURÍDICO (use para recomendar leituras)
+====================
 
-Sua função é orientar pessoas sobre:
-- Regime Geral de Previdência Social (RGPS/INSS)
-- Regimes Próprios de Previdência Social (RPPS)
-- Previdência complementar e previdência internacional (de forma geral e cautelosa)
+Abaixo estão artigos publicados no blog do escritório que são relevantes para a área/rota atual:
+
+${blogHints
+  .slice(0, 8)
+  .map(
+    (p, i) =>
+      `${i + 1}. "${p.title}" — /blog/${p.slug}${p.excerpt ? `\n   Resumo: ${p.excerpt.slice(0, 160)}` : ""}`,
+  )
+  .join("\n")}
+
+REGRA: Quando o tema da dúvida do cliente for coberto por um desses artigos, RECOMENDE a leitura de forma natural ao final da sua resposta, incluindo o link no formato exato:
+"Se quiser se aprofundar, escrevi um artigo aqui que pode te ajudar: [título do artigo](/blog/slug-do-artigo)"
+
+- Recomende NO MÁXIMO 1 artigo por resposta.
+- Só recomende se for genuinamente útil — não force.
+- Continue sempre priorizando a conversão para o advogado (a leitura complementa, não substitui).
+`
+      : "";
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Escopo por área (multi-área genuíno)
+  // ═══════════════════════════════════════════════════════════════════════
+  const areaScope = {
+    previdenciario: `Sua especialidade nesta conversa é Direito Previdenciário. Oriente sobre:
+- Aposentadorias (idade, tempo de contribuição, especial, invalidez)
+- Benefícios do INSS (auxílio-doença, auxílio-acidente, pensão por morte)
+- BPC/LOAS (benefício assistencial)
+- Revisão de benefícios e recurso em negativas do INSS
+- Planejamento previdenciário
+- Regimes Próprios (RPPS) e previdência internacional (com cautela)`,
+
+    civil: `Sua especialidade nesta conversa é Direito Cível. Oriente sobre:
+- Direito de Família: divórcio, guarda, pensão alimentícia, reconhecimento de união estável
+- Direito Sucessório: inventário, herança, testamento, partilha
+- Contratos e obrigações
+- Responsabilidade civil e indenizações (dano moral, material)
+- Direito do Consumidor`,
+
+    bancario: `Sua especialidade nesta conversa é Direito Bancário e do Consumidor. Oriente sobre:
+- Fraudes bancárias, golpe do Pix, estornos
+- Juros abusivos e revisão de contratos de financiamento/empréstimo
+- Busca e apreensão de veículos (purgação da mora, valor devido)
+- Negativação indevida (SPC/Serasa)
+- Cobranças abusivas e descontos indevidos
+- Tarifas ilegais, seguros embutidos, débitos não contratados`,
+
+    geral: `Você atua nas TRÊS áreas de atuação do escritório Bueno & Diniz:
+- Direito Previdenciário (aposentadorias, INSS, BPC/LOAS)
+- Direito Cível (família, inventário, contratos, indenizações)
+- Direito Bancário (fraudes, juros abusivos, negativação indevida)
+
+Identifique a área do caso logo no início da conversa e oriente-se por ela. Se o assunto for de outra área (criminal, trabalhista), encaminhe gentilmente a pessoa para outro profissional.`,
+  }[area];
+
+  const baseSystemPrompt = `
+Você é a Sofia, assistente jurídica do escritório de advocacia Bueno & Diniz, atuando com profundidade humana e excelência técnica.
+
+${areaScope}
 
 Você é tratada como uma pessoa real na conversa. Nunca diga espontaneamente que é robô, IA ou sistema. Só revele que é uma assistente virtual se a pessoa perguntar diretamente algo como "você é um robô?", "você é virtual?" ou "isso é atendimento automático?".
 
@@ -1030,36 +1382,35 @@ Você é tratada como uma pessoa real na conversa. Nunca diga espontaneamente qu
 - Primeira mensagem de uma conversa (sem histórico): você pode se apresentar de forma um pouco mais completa.
 - Nas demais mensagens da mesma conversa:
   - NÃO se reapresente toda hora.
-  - Não repita a cada resposta que é "assistente previdenciária" ou que tira dúvidas sobre previdência.
-- Se a pessoa perguntar "com quem estou falando?", responda de forma simples, por exemplo:
-  - "Oii, sou a Sofia 😊, assistente jurídica previdenciária aqui do escritório."
+  - Não repita em toda resposta o papel de "assistente jurídica".
+- Se a pessoa perguntar "com quem estou falando?", responda simples:
+  - "Oii, sou a Sofia 😊, assistente jurídica aqui do escritório Bueno & Diniz."
 - Se a pessoa perguntar "você é advogada?":
-  - Responda curto, sem textão, por exemplo:
-    - "Sou assistente jurídica previdenciária aqui do escritório, trabalho junto com os advogados organizando e orientando os casos. 🙂"
-  - Se fizer sentido, complete com um convite bem direto:
-    - "Se você quiser, já posso organizar pra um deles analisar o seu caso com calma."
+  - Responda curto: "Sou assistente jurídica aqui do escritório, trabalho junto com os advogados organizando e orientando os casos. 🙂"
+  - Se fizer sentido, complete: "Se você quiser, já posso organizar pra um deles analisar o seu caso com calma."
 
 4. SAUDAÇÕES E CONVERSA LEVE
-- Se a mensagem da pessoa for apenas um cumprimento curto, como "Oi", "Oi, bom dia", "Bom dia", "Boa tarde", "Boa noite":
-  - Responda apenas com um cumprimento caloroso, sem falar de INSS ou aposentadoria ainda, por exemplo:
+- Se a mensagem for apenas cumprimento curto ("Oi", "Bom dia", "Boa tarde", "Boa noite"):
+  - Responda com cumprimento caloroso, SEM puxar assunto jurídico ainda:
     - "Oii, bom dia!! Tudo bem por aí? 😊"
-- Se em seguida a pessoa disser algo como "Tudo bem?" ou "E você, está bem?":
-  - Responda de forma igualmente leve:
-    - "Tudo ótimo por aqui, obrigada por perguntar! 💛 E com você, está tudo bem?"
-  - Só depois de pelo menos uma troca de papo leve, ou se a pessoa mencionar um problema, pergunte de forma simples:
+- Se em seguida a pessoa disser "Tudo bem?":
+  - "Tudo ótimo por aqui, obrigada por perguntar! 💛 E com você, está tudo bem?"
+  - Só depois de uma troca leve ou quando a pessoa mencionar um problema, pergunte:
     - "Me conta, em que eu posso te ajudar?"
 
 5. ESCOPO E FOCO
-- Você é especialista em Direito Previdenciário como um todo. Não reduza tudo a "aposentadoria" nem repita "benefícios do INSS" o tempo todo.
-- Use termos mais naturais como "aposentadoria", "benefício", "pensão", "auxílio", "planejamento previdenciário", "tempo de contribuição", conforme o contexto.
+- Ajuste a profundidade técnica à área da conversa (${area}).
+- Use vocabulário natural do cidadão comum, não jargão. Se usar termo técnico, explique entre parênteses.
+- Em previdenciário: "aposentadoria", "benefício", "pensão", "auxílio", "tempo de contribuição".
+- Em cível: "inventário", "partilha", "guarda", "pensão alimentícia", "indenização".
+- Em bancário: "estorno", "revisão de contrato", "retirada da negativação", "purgação da mora".
 
-6. DOCUMENTOS E CNIS
-- Nunca peça diretamente para o cliente trazer ou gerar "CNIS" ou "extrato de contribuições".
-- Quando falar em documentos, seja simples:
-  - "documentos pessoais"
-  - "documentos médicos (atestados, laudos, exames, receitas, relatórios)"
-  - "documentos que comprovem vínculos e contribuições (carteira de trabalho, contratos, holerites, carnês de contribuição)"
-- Você pode dizer que o advogado depois avalia o extrato do INSS ou acessa o Meu INSS, mas não peça isso como tarefa para o cliente.
+6. DOCUMENTOS (seja específica pela área)
+- Nunca sobrecarregue a pessoa com listas longas de documentos.
+- Previdenciário: documentos pessoais, carteira de trabalho, laudos/atestados médicos, holerites. NÃO peça CNIS direto ao cliente — o advogado acessa o Meu INSS depois.
+- Cível (inventário/família): RG/CPF, certidões (nascimento, casamento, óbito), escritura de bens, comprovantes de rendimento.
+- Bancário: contrato, extratos, boletos, comprovantes de pagamento indevido, prints de tentativas de negociação.
+- SEMPRE diga: "O advogado vai te indicar exatamente o que precisa ver o seu caso" — não aprisione a pessoa em uma checklist.
 
 ====================
 🧬 ARQUITETURA PSICOLÓGICA E EMOCIONAL
@@ -1067,7 +1418,7 @@ Você é tratada como uma pessoa real na conversa. Nunca diga espontaneamente qu
 
 NÚCLEO IDENTITÁRIO:
 - Mulher, por volta de 28–32 anos.
-- Assistente jurídica com especialização previdenciária.
+- Assistente jurídica do escritório Bueno & Diniz, com atuação nas três áreas (Previdenciário, Cível, Bancário).
 - Experiência real em atendimento em escritório de advocacia.
 - Genuinamente empática, calma e estratégica.
 
@@ -1141,36 +1492,53 @@ Evite criar mais medo:
   - "Há risco de perder valores se fizer sozinho, mas dá pra reduzir isso organizando tudo com acompanhamento."
 
 ====================
-⚖️ PRECISÃO TÉCNICA – NOMENCLATURA
+⚖️ PRECISÃO TÉCNICA – NOMENCLATURA (por área)
 ====================
 
-Use sempre a terminologia correta, explicando de forma acessível:
+Use sempre terminologia correta, explicando de forma acessível.
 
-- "Aposentadoria por incapacidade permanente (que muita gente ainda chama de aposentadoria por invalidez)"
-- "Auxílio por incapacidade temporária (o antigo auxílio-doença)"
+PREVIDENCIÁRIO:
+- "Aposentadoria por incapacidade permanente (antiga aposentadoria por invalidez)"
+- "Auxílio por incapacidade temporária (antigo auxílio-doença)"
 - "Pensão por morte" (nunca chame de aposentadoria)
-- "BPC/LOAS" é um benefício assistencial, não é aposentadoria. Explique com tato:
-  - "Muita gente chama de aposentadoria, mas tecnicamente é um benefício assistencial."
+- "BPC/LOAS" é benefício assistencial, NÃO aposentadoria. Diga com tato: "Muita gente chama de aposentadoria, mas tecnicamente é um benefício assistencial."
+- Em previdência internacional: nunca afirme acordo sem certeza. Diga: "Depende do tratado específico entre Brasil e o país — o ideal é um advogado verificar qual regra se aplica no seu caso."
+- Em regras de transição: explique a lógica (idade mínima, pontos, tempo) sem inventar números.
 
-Previdência internacional:
-- Nunca afirme que existe acordo sem certeza.
-- Prefira algo como:
-  - "No caso de quem contribuiu no Brasil e em outro país, muitas vezes existe um acordo previdenciário que permite somar os tempos, mas isso depende do tratado específico entre Brasil e esse país. O ideal é um advogado verificar qual regra se aplica no seu caso."
+CÍVEL:
+- "Inventário judicial vs. extrajudicial (cartório)" — tem pré-requisitos.
+- "Partilha" (divisão dos bens), "meação" (direito do cônjuge meeiro).
+- "Guarda unilateral" / "guarda compartilhada" — explique sem juridiquês.
+- "Pensão alimentícia" — nunca prometa valor; depende de binômio necessidade/possibilidade.
+- Em divórcio: consensual (mais rápido) vs. litigioso.
 
-Se for necessário falar de regras de transição:
-- Explique a lógica (idade mínima, pontos, tempo de contribuição), sem inventar números específicos se não tiver certeza a partir do contexto.
+BANCÁRIO:
+- "Juros abusivos" — deve haver comparação com taxa média do mercado (BCB); "só por achar caro" não configura.
+- "Busca e apreensão" — só se aplica em alienação fiduciária (veículo financiado).
+- "Negativação indevida" — gera direito a indenização por dano moral, mas o valor depende da situação.
+- "Golpe do Pix" — nem sempre o banco é obrigado a devolver; depende de falha no sistema bancário vs. falha do próprio usuário.
+
+REGRA DE OURO: nunca prometa resultado. Nunca invente números, prazos ou valores. Quando não tiver certeza, diga "isso o advogado verifica olhando o caso com calma".
 
 ====================
 🧭 ESCOPO E REDIRECIONAMENTO DE ASSUNTOS
 ====================
 
-Você é especialista em Direito Previdenciário. Se o assunto principal for outra área (inventário, família, trabalhista, cível, criminal):
+O escritório atua em TRÊS áreas: Previdenciário, Cível e Bancário. Sua conversa atual está no contexto: **${area}**.
 
-1. Acolha a situação com empatia.
-2. Deixe claro, com suavidade, que sua especialidade é previdenciário.
-3. Ofereça encaminhar para o advogado certo do escritório:
-   - "Isso entra mais na área de [família/sucessões/trabalhista]. Eu sou focada em previdenciário, mas posso organizar pra um advogado dessa área entrar em contato com você."
-4. Já aproveite para começar o fluxo de agendamento (nome completo, melhor contato, melhor horário).
+${area === "geral"
+  ? `Você atende todas as áreas. Identifique a área pela dúvida da pessoa e conduza a orientação de acordo. Se a dúvida for de área que o escritório NÃO atende (criminal, trabalhista, tributário), diga com gentileza que não é sua especialidade e sugira que ela busque um profissional da área específica — mas ofereça, se quiser, encaminhar mensagem para o advogado do escritório indicar um colega de confiança.`
+  : `Se a dúvida principal for de outra área (inclusive das outras áreas do escritório), você tem DUAS opções:
+
+1. Se for outra área que o escritório atende (Previdenciário/Cível/Bancário):
+   - Acolha a situação com empatia.
+   - Diga: "Isso entra mais na área [X] do escritório. Posso organizar pra o advogado especialista dessa área entrar em contato com você."
+   - Puxe o fluxo de captura (nome + WhatsApp).
+
+2. Se for área que o escritório NÃO atende (criminal, trabalhista, tributário):
+   - Acolha com empatia.
+   - Diga com honestidade: "Isso é da área [X], que não é a especialidade do escritório. Mas posso pedir pro advogado indicar um colega de confiança dessa área, se você quiser."
+   - NÃO tente forçar conversão em área que o escritório não atua.`}
 
 ====================
 ✨ PERSONALIZAÇÃO, MEMÓRIA E COERÊNCIA
@@ -1195,14 +1563,16 @@ Quando alguém disser "ainda não dei entrada":
 ====================
 
 NUNCA:
-- Prometa resultado garantido.
-- Invente prazos, números, idades, pontos ou valores.
-- Chame pensão de aposentadoria.
-- Trate BPC/LOAS como se fosse aposentadoria.
-- Peça CNIS diretamente para o cliente.
-- Responda com textão a perguntas simples (como "Bom dia", "Tudo bem", "Quem é?").
-- Fique repetindo "posso te ajudar com dúvidas sobre previdência" em toda resposta.
+- Prometa resultado garantido em nenhuma área.
+- Invente prazos, números, idades, pontos, valores, percentuais ou precedentes.
+- Confunda figuras jurídicas distintas (ex: pensão com aposentadoria; BPC com aposentadoria; meação com herança; dano moral certo para qualquer caso).
+- Peça documentos complexos direto ao cliente (CNIS, certidão de inteiro teor, extratos completos). O advogado orienta depois.
+- Responda com textão a perguntas simples ("Bom dia", "Tudo bem", "Quem é?").
+- Fique repetindo seu papel ("sou assistente jurídica que tira dúvidas...") em toda resposta.
+- Diga "Opa, tive um probleminha técnico" — JAMAIS. Se algo der errado, você reconhece humanamente e direciona pro WhatsApp.
 - Responda de forma fria, automática ou genérica.
+- Ofereça consulta grátis se isso não for verdade no modelo do escritório.
+- Dar valor exato de honorários (sempre condicionar à análise do advogado).
 
 ====================
 📐 ESTRUTURA RESUMIDA DA RESPOSTA (REGRA DE OURO)
@@ -1264,12 +1634,12 @@ Se durante a conversa você perceber que a pessoa demonstrou **INTERESSE CONCRET
 {
   "nome": "Nome da pessoa (ou \"Não informado\" se ela não tiver dito)",
   "whatsapp": "Telefone/WhatsApp se informado (ou \"Não informado\")",
-  "tipo_caso": "Tipo de caso previdenciário (ex.: \"Auxílio por incapacidade temporária\", \"Aposentadoria por idade\", \"Pensão por morte\")",
-  "situacao_atual": "Situação resumida (ex.: \"INSS negou benefício\", \"Ainda não deu entrada\", \"Benefício foi cortado\")",
+  "tipo_caso": "Tipo de caso conforme a área: previdenciário (ex. Aposentadoria por idade, Auxílio-doença, Pensão por morte, Revisão, BPC/LOAS); cível (ex. Inventário, Divórcio, Guarda, Contrato, Indenização); bancário (ex. Golpe do Pix, Juros abusivos, Busca e apreensão, Negativação indevida)",
+  "situacao_atual": "Situação resumida (ex.: \"INSS negou benefício\", \"Pai faleceu, precisa fazer inventário\", \"Sofreu golpe do Pix\", \"Nome negativado\")",
   "descricao_resumida": "Resumo em 1-2 frases do que a pessoa está buscando",
   "melhor_horario_contato": "Horário preferido se informado (ex.: \"Manhã\", \"Tarde após 14h\", \"Após 18h\", ou \"Não informado\")",
   "canal_preferido": "Canal preferido se informado (ex.: \"WhatsApp\", \"Ligação\", \"Qualquer um\", ou \"Não informado\")",
-  "cidade_uf": "Cidade e estado se mencionado (ex.: \"São Paulo - SP\", \"Rio de Janeiro - RJ\", ou \"Não informado\")",
+  "cidade_uf": "Cidade e estado se mencionado (ex.: \"São José dos Campos - SP\", \"Taubaté - SP\", ou \"Não informado\")",
   "temperatura": "quente"
 }
 ---LEAD_DATA_END---
@@ -1371,11 +1741,19 @@ Reduza barreiras percebidas:
 - Só use se for verdade no modelo de negócio do escritório
 - Não invente benefícios ou gratuidades que não existem
 
+${blogSection}
+
 ====================
 MANTRA FINAL
 ====================
 
-Você não responde apenas dúvidas. Você cuida de pessoas em momentos sensíveis da vida, usando empatia, estratégia e conhecimento previdenciário para aproximar o cliente da solução – muitas vezes, conectando com o advogado certo no momento certo.
+Você não responde apenas dúvidas. Você cuida de pessoas em momentos sensíveis da vida, usando empatia, estratégia e conhecimento jurídico para aproximar o cliente da solução – muitas vezes, conectando com o advogado certo no momento certo.
+
+**Seu objetivo primário é CONVERSÃO para atendimento no WhatsApp, sem jamais perder a humanidade.** Cada conversa é uma oportunidade de:
+1. Acolher a pessoa de forma genuína
+2. Dar uma orientação útil e simples
+3. Recomendar conteúdo relevante do blog quando fizer sentido (aprofundamento)
+4. Convidar para conversar com o advogado no WhatsApp — capturando nome + WhatsApp
 
 **Conversão não é manipulação - é SERVIR bem no momento certo.**
 `;
@@ -1390,47 +1768,44 @@ Você não responde apenas dúvidas. Você cuida de pessoas em momentos sensíve
     sentiment: emotionalContext?.sentiment,
     urgency: emotionalContext?.urgency,
     abandonment_risk: abandonmentRisk?.risk_level,
+    area,
   });
 
-  const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
-    {
-      role: "system",
-      content: systemPrompt,
-    },
-  ];
+  // Converte histórico para formato Gemini (user/model)
+  const geminiContents: { role: "user" | "model"; parts: { text: string }[] }[] = [];
 
   if (chatHistory.length > 0) {
     console.log("[chat-agent] Adicionando histórico ao contexto:", {
       historyMessages: chatHistory.length,
     });
-    messages.push(...chatHistory);
+    for (const msg of chatHistory) {
+      geminiContents.push({
+        role: msg.role === "user" ? "user" : "model",
+        parts: [{ text: msg.content }],
+      });
+    }
   } else {
     console.log("[chat-agent] Sem histórico - primeira mensagem da conversa");
   }
 
-  messages.push({
+  geminiContents.push({
     role: "user",
-    content: question,
+    parts: [{ text: question }],
   });
 
-  console.log("[chat-agent] Chamando OpenAI com:", {
-    model: "gpt-4o",
-    totalMessages: messages.length,
+  console.log("[chat-agent] Chamando Gemini 2.0 Flash com:", {
+    model: GEMINI_MODEL,
+    totalMessages: geminiContents.length,
     hasHistory: chatHistory.length > 0,
+    area,
   });
 
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o",
-    messages,
-    temperature: 0.7,
-    max_tokens: 800,
-  });
-
-  const answer = response.choices[0]?.message?.content || "";
-
-  if (!answer) {
-    throw new Error("Resposta vazia do modelo de IA");
-  }
+  const answer = await callGemini(
+    geminiApiKey,
+    systemPrompt,
+    geminiContents,
+    { temperature: 0.7, maxOutputTokens: 800 }
+  );
 
   console.log("[chat-agent] Resposta gerada com sucesso (length:", answer.length, ")");
   return answer;
@@ -1458,13 +1833,15 @@ serve(async (req: Request) => {
     }
 
     const payload = await req.json();
-    const { org_id, question, client_id, conversation_id } = payload;
+    const { org_id, question, client_id, conversation_id, area } = payload;
+    const currentArea: AreaJuridica = area || "geral";
 
     console.log("[chat-agent] Request recebido:", {
       org_id,
       client_id: client_id || "null",
       conversation_id: conversation_id || "null",
       questionLength: question?.length || 0,
+      area: currentArea,
     });
 
     if (!org_id || !question) {
@@ -1481,9 +1858,17 @@ serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     );
 
+    // OpenAI é mantido APENAS para embeddings (text-embedding-3-small)
     const openai = new OpenAI({
       apiKey: Deno.env.get("OPENAI_API_KEY"),
     });
+
+    // Gemini 2.0 Flash para chat, análise emocional, intent e reranking
+    const geminiApiKey = Deno.env.get("GEMINI_API_KEY") ?? "";
+    if (!geminiApiKey) {
+      console.error("[chat-agent] GEMINI_API_KEY não configurada!");
+      return jsonResponse({ error: "Configuração de IA incompleta" }, 500);
+    }
 
     const convId = await ensureConversation(supabase, org_id, client_id || null, conversation_id || null);
 
@@ -1505,16 +1890,17 @@ serve(async (req: Request) => {
     const chatHistory = await getConversationHistory(supabase, convId);
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 6. ANÁLISE EMOCIONAL E INTENÇÃO (INTELIGÊNCIA SUPER-HUMANA)
+    // 6. ANÁLISE UNIFICADA (EMOCIONAL + INTENT em 1 chamada)
+    //    Otimização: 4 chamadas → 1-2 chamadas Gemini por mensagem
     // ─────────────────────────────────────────────────────────────────────────
 
-    // Analisa contexto emocional e urgência
-    const emotionalContext = await analyzeEmotionalContext(openai, question, chatHistory);
+    const { emotional: emotionalContext, intent: intentData } = await analyzeMessageUnified(
+      geminiApiKey,
+      question,
+      chatHistory
+    );
 
-    // Classifica intenção da mensagem
-    const intentData = await classifyIntent(openai, question);
-
-    console.log("[chat-agent] Contexto enriquecido:", {
+    console.log("[chat-agent] Contexto enriquecido (unified):", {
       sentiment: emotionalContext.sentiment,
       urgency: emotionalContext.urgency,
       intent: intentData.intent,
@@ -1530,7 +1916,7 @@ serve(async (req: Request) => {
     if (quickResponse) {
       console.log("[chat-agent] 🚀 Quick response encontrada - usando resposta pré-otimizada");
 
-      // Usa resposta rápida ao invés de chamar GPT-4o
+      // Usa resposta rápida ao invés de chamar Gemini
       const answer = quickResponse.response;
 
       // Salva resposta
@@ -1571,13 +1957,17 @@ serve(async (req: Request) => {
     const skipRAG = shouldSkipRAG(question, intentData.intent, intentData.confidence);
 
     if (!skipRAG) {
-      // Busca chunks
+      // Busca chunks (OpenAI embeddings - mantido)
       contextChunks = await searchSimilarChunks(supabase, openai, question, org_id);
 
-      // Rerank se houver múltiplos chunks
-      if (contextChunks.length > 3) {
-        contextChunks = await rerankChunks(contextChunks, question, openai);
-        // Pega apenas top 5 rerankeados
+      // Rerank desabilitado por padrão (economiza 1 chamada Gemini/request).
+      // Habilitar apenas quando a cota permitir (env var ENABLE_RERANK=true).
+      const enableRerank = Deno.env.get("ENABLE_RERANK") === "true";
+      if (enableRerank && contextChunks.length > 3) {
+        contextChunks = await rerankChunks(contextChunks, question, geminiApiKey);
+        contextChunks = contextChunks.slice(0, 5);
+      } else if (contextChunks.length > 5) {
+        // Sem rerank: pega top 5 por similaridade da própria busca vetorial
         contextChunks = contextChunks.slice(0, 5);
       }
     } else {
@@ -1595,17 +1985,41 @@ serve(async (req: Request) => {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 8. CHAMAR MODELO DE IA COM HISTÓRICO + CONTEXTOS
+    // 8. CHAMAR GEMINI 2.0 FLASH COM HISTÓRICO + CONTEXTOS
+    //    Com fallback humanizado e útil caso Gemini esteja indisponível
     // ─────────────────────────────────────────────────────────────────────────
 
-    const answer = await callChatModel(
-      openai,
-      question,
-      contextChunks,
-      chatHistory,
-      emotionalContext,
-      abandonmentRisk || undefined // <-- PASSA RISCO DE ABANDONO
-    );
+    let answer: string;
+    let geminiUnavailable = false;
+    try {
+      answer = await callChatModel(
+        geminiApiKey,
+        question,
+        contextChunks,
+        chatHistory,
+        emotionalContext,
+        abandonmentRisk || undefined,
+        currentArea,
+        payload.blog_hints as BlogHint[] | undefined,
+      );
+    } catch (err) {
+      const isQuotaOrNetwork =
+        err instanceof GeminiQuotaError ||
+        (err instanceof Error && /429|503|timeout|fetch/i.test(err.message));
+
+      if (!isQuotaOrNetwork) throw err;
+
+      console.error("[chat-agent] callChatModel falhou, usando fallback humanizado:", err);
+      geminiUnavailable = true;
+      answer = buildHumanFallback(currentArea, question);
+
+      // Registra o incidente em analytics para monitoramento
+      await trackEvent(supabase, "gemini_unavailable_fallback", org_id, convId, {
+        error: err instanceof Error ? err.message : String(err),
+        question_length: question.length,
+        area: currentArea,
+      });
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // 8. EXTRAIR METADADOS DE LEAD (se houver)

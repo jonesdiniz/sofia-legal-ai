@@ -4,7 +4,7 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * Sistema de respostas rápidas para intents comuns e perguntas frequentes.
- * Reduz latência em 70% e custo em 80% ao evitar chamadas desnecessárias ao GPT-4o.
+ * Reduz latência em 70% e custo em 80% ao evitar chamadas desnecessárias ao LLM.
  *
  * Usado quando:
  * - Intent detectada com confiança > 0.85
@@ -73,7 +73,7 @@ export const QUICK_RESPONSES: QuickResponse[] = [
       /^com quem (estou falando|falo|to falando)\??$/i,
       /^(você|vc) (é|e) quem\??$/i,
     ],
-    response: "Oii, sou a Sofia 😊, assistente jurídica previdenciária aqui do escritório.",
+    response: "Oii, sou a Sofia 😊, assistente jurídica aqui do escritório Bueno & Diniz. Como posso te ajudar?",
     skipRAG: true,
     requiresMinConfidence: 0.8,
   },
@@ -83,7 +83,7 @@ export const QUICK_RESPONSES: QuickResponse[] = [
       /^(você|vc|tu) (é|e) (um |uma )?(robô|robo|bot|ia|inteligência artificial|sistema|automática|automatico)\??$/i,
       /^(isso|este|esse) (é|e) (um |uma )?(atendimento )?(automático|automatico|robô|robo|bot)\??$/i,
     ],
-    response: "Sou uma assistente virtual 😊, trabalho aqui com os advogados do escritório organizando e orientando sobre questões previdenciárias. Mas se precisar falar com um advogado de verdade, é só me avisar que eu organizo!",
+    response: "Sou uma assistente virtual 😊, trabalho aqui com os advogados do escritório orientando sobre questões jurídicas. Mas se precisar falar com um advogado de verdade, é só me avisar que eu organizo!",
     skipRAG: true,
     requiresMinConfidence: 0.85,
   },
@@ -93,7 +93,7 @@ export const QUICK_RESPONSES: QuickResponse[] = [
       /^(você|vc|tu) (é|e) (advogada|advogado)\??$/i,
       /^(você|vc) trabalha como advogad[ao]\??$/i,
     ],
-    response: "Sou assistente jurídica previdenciária aqui do escritório, trabalho junto com os advogados organizando e orientando os casos. 🙂 Se você quiser, já posso organizar pra um deles analisar o seu caso com calma.",
+    response: "Sou assistente jurídica aqui do escritório, trabalho junto com os advogados orientando e organizando os casos. 🙂 Se você quiser, já posso organizar pra um deles analisar o seu caso com calma.",
     skipRAG: true,
     requiresMinConfidence: 0.85,
   },
