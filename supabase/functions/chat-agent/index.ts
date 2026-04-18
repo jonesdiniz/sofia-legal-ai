@@ -24,11 +24,16 @@ import OpenAI from "https://deno.land/x/openai@v4.20.1/mod.ts";
 import { getQuickResponse, shouldSkipRAG } from "./quick-responses.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════
-// GEMINI 2.0 FLASH - Cliente REST nativo
+// GEMINI 2.5 FLASH - Cliente REST nativo
+// ═══════════════════════════════════════════════════════════════════════════
+// NOTA: gemini-2.0-flash e gemini-1.5-flash foram descontinuados para novos
+// projetos (erro 404). Usamos 2.5-flash com thinking DESABILITADO para manter
+// latência baixa de chatbot. Fallback em 2.5-pro (também sem thinking) quando
+// há rate-limit 429/503 no 2.5-flash.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const GEMINI_MODEL = "gemini-2.0-flash";
-const GEMINI_MODEL_FALLBACK = "gemini-1.5-flash"; // fallback if 2.0 is rate-limited
+const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL_FALLBACK = "gemini-2.5-pro"; // fallback se 2.5-flash for rate-limited
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 /** Erro tipado para 429 / rate limit / quota */
@@ -59,6 +64,9 @@ async function callGeminiOnce(
     generationConfig: {
       temperature: options.temperature ?? 0.7,
       maxOutputTokens: options.maxOutputTokens ?? 800,
+      // 2.5-flash/pro usam thinking por padrão; desligamos para chatbot
+      // (latência baixa importa mais que raciocínio multi-passo aqui).
+      thinkingConfig: { thinkingBudget: 0 },
     },
   };
 
@@ -95,8 +103,8 @@ async function callGeminiOnce(
 /**
  * Chama Gemini com retry exponencial + fallback automático para modelo menor quando 429/503.
  * Estratégia:
- *   1. Tenta gemini-2.0-flash (até 2 retries com backoff 500ms, 1500ms)
- *   2. Se ainda 429/503, tenta gemini-1.5-flash (1 tentativa)
+ *   1. Tenta gemini-2.5-flash (até 2 retries com backoff 500ms, 1500ms)
+ *   2. Se ainda 429/503, tenta gemini-2.5-pro (1 tentativa)
  *   3. Se falhar tudo, relança GeminiQuotaError para o caller decidir o fallback UX
  */
 async function callGeminiWithRetry(
@@ -130,7 +138,7 @@ async function callGeminiWithRetry(
     console.warn(`[chat-agent] Tentando fallback para ${GEMINI_MODEL_FALLBACK}`);
     return await callGeminiOnce(apiKey, GEMINI_MODEL_FALLBACK, systemInstruction, contents, options);
   } catch (err) {
-    console.error("[chat-agent] Fallback Gemini 1.5 também falhou:", err);
+    console.error(`[chat-agent] Fallback ${GEMINI_MODEL_FALLBACK} também falhou:`, err);
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 }
