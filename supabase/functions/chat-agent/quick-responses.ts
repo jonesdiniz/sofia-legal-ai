@@ -73,7 +73,7 @@ export const QUICK_RESPONSES: QuickResponse[] = [
       /^com quem (estou falando|falo|to falando)\??$/i,
       /^(você|vc) (é|e) quem\??$/i,
     ],
-    response: "Oii, sou a Sofia 😊, assistente jurídica aqui do escritório Bueno & Diniz. Como posso te ajudar?",
+    response: "Oii, sou a Sofia 😊, assistente jurídica aqui do escritório Bueno Diniz Advocacia & Consultoria Jurídica. Como posso te ajudar?",
     skipRAG: true,
     requiresMinConfidence: 0.8,
   },
