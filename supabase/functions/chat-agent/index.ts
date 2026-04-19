@@ -2235,6 +2235,52 @@ serve(async (req: Request) => {
           });
 
           // ─────────────────────────────────────────────────────────────────────
+          // NOTIFICAR JONES POR EMAIL (fire-and-forget, não bloqueia resposta)
+          // ─────────────────────────────────────────────────────────────────────
+          // Chama a Edge Function send-lead-notification que envia um email
+          // formatado (temperatura, tipo de caso, resumo da conversa) pro
+          // escritório. Se falhar, o lead continua no banco normalmente.
+          const notifyUrl = `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/send-lead-notification`;
+          const notifyPayload = {
+            lead_id: leadId,
+            nome: fullLead.nome,
+            whatsapp: fullLead.whatsapp,
+            tipo_caso: fullLead.tipo_caso,
+            temperatura: fullLead.temperatura,
+            situacao_atual: fullLead.situacao_atual,
+            descricao_resumida: fullLead.descricao_resumida,
+            melhor_horario_contato: leadData.melhor_horario_contato ?? null,
+            canal_preferido: leadData.canal_preferido ?? null,
+            cidade_uf: leadData.cidade_uf ?? null,
+            conversation_id: convId,
+            sentiment: emotionalContext.sentiment,
+            urgency: emotionalContext.urgency,
+          };
+          fetch(notifyUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""}`,
+            },
+            body: JSON.stringify(notifyPayload),
+          })
+            .then(async (response) => {
+              if (!response.ok) {
+                const body = await response.text().catch(() => "");
+                console.warn(
+                  "[chat-agent] send-lead-notification retornou não-OK:",
+                  response.status,
+                  body.slice(0, 200),
+                );
+              } else {
+                console.log("[chat-agent] 📧 Notificação por email disparada para lead", leadId);
+              }
+            })
+            .catch((err) => {
+              console.warn("[chat-agent] send-lead-notification falhou (não-crítico):", err);
+            });
+
+          // ─────────────────────────────────────────────────────────────────────
           // ATUALIZAR SCORE DO LEAD (Sistema de Qualificação Automática)
           // ─────────────────────────────────────────────────────────────────────
           // Calcula score baseado em: engagement, urgency, data_quality, intent, timing
