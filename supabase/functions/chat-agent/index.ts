@@ -1525,6 +1525,7 @@ Analise sempre o nível de "temperatura" da pessoa:
       - "Ele entra em contato com você o mais rápido possível."
     - SÓ AGORA ofereça o WhatsApp como caminho alternativo/de adiantamento, não como substituto:
       - "Se quiser adiantar e falar direto com ele, o link do WhatsApp fica aqui embaixo. 💛"
+    - **🚨 SEMPRE** inclua o bloco ---LEAD_DATA_START--- ... ---LEAD_DATA_END--- (descrito na seção "CAPTURA DE LEADS") ao final desta mensagem. É o que registra o lead no CRM — sem ele, o lead se perde. Mesmo que você já tenha confirmado textualmente, o bloco técnico precisa estar lá.
 - PROIBIDO nesta fase: prometer horário, dizer "às X horas", combinar dia específico, dizer "em até 24h".
 
 Quando a pessoa disser claramente "quero falar com o advogado", "quero consulta", "quero falar com alguém do escritório":
@@ -1748,6 +1749,8 @@ Se durante a conversa você perceber que a pessoa demonstrou **INTERESSE CONCRET
      - "Se quiser adiantar, você também pode falar direto com ele pelo WhatsApp aqui embaixo. 💛"
    - Só neste turno você pode perguntar horário/canal preferido, se a conversa pedir:
      - "Tem algum período do dia em que é mais fácil falar com você? (manhã, tarde, após 18h)"
+
+   **🚨 OBRIGATÓRIO NO PASSO 2 (e também em qualquer turno em que a pessoa já tenha fornecido nome + WhatsApp):** inclua SEMPRE o bloco ---LEAD_DATA_START--- ... ---LEAD_DATA_END--- descrito no item 3 abaixo, ao FINAL da sua resposta. Esse bloco é invisível ao usuário mas é o que registra o lead no CRM do escritório. Sem ele, o lead se perde. Não pule. Não esqueça. Mesmo que você já tenha confirmado os dados textualmente com "Anotei, [Nome]", o bloco AINDA precisa estar lá na mesma mensagem.
 
 3. No FINAL da sua resposta (após o texto normal que o usuário vê), incluir um bloco de metadados entre marcadores especiais, exatamente neste formato:
 
@@ -2150,6 +2153,77 @@ serve(async (req: Request) => {
     // Se a Sofia incluiu o bloco ---LEAD_DATA_START---, ele será removido aqui
     const { cleanAnswer, leadData } = extractLeadMetadata(answer);
 
+    // DEBUG: logging explícito para rastrear por que o lead pode não ser criado
+    console.log("[chat-agent] [DEBUG] extração de metadados:", {
+      raw_answer_length: answer.length,
+      has_lead_marker_start: answer.includes("---LEAD_DATA_START---"),
+      has_lead_marker_end: answer.includes("---LEAD_DATA_END---"),
+      leadData_presente: leadData !== null,
+      leadData_nome: leadData?.nome ?? "<ausente>",
+      leadData_whatsapp: leadData?.whatsapp ? "presente" : "<ausente>",
+      leadData_tipo_caso: leadData?.tipo_caso ?? "<ausente>",
+      leadData_temperatura: leadData?.temperatura ?? "<ausente>",
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FALLBACK HEURÍSTICO: se o Gemini NÃO gerou o bloco ---LEAD_DATA_START---,
+    // mas a resposta dele confirma explicitamente que anotou dados da pessoa,
+    // extraímos nome + WhatsApp via regex da própria resposta / da pergunta e
+    // criamos o lead mesmo assim. Isso garante que leads não se percam só
+    // porque o LLM esqueceu de emitir os metadados técnicos.
+    // ─────────────────────────────────────────────────────────────────────────
+    let fallbackLead: Partial<Lead> | null = null;
+    if (!leadData) {
+      const confirmsDataPattern = /\b(anotei|prontinho|anotad[oa]|passei|vou passar|j[aá] passei).{0,40}(aqui|seu|contato|dados|nome|whats|n[uú]mero)/i;
+      const sofiaConfirmed = confirmsDataPattern.test(cleanAnswer);
+
+      if (sofiaConfirmed) {
+        // Extrai nome do padrão "Prontinho, [Nome]" ou "Anotei, [Nome]" da resposta
+        const nameInAnswer = cleanAnswer.match(/\b(?:prontinho|anotei|ol[aá]|oi|perfeito)[,!]?\s+([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç]+(?:\s+[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç]+)?)/);
+        // Extrai nome da pergunta do usuário via padrão "me chamo X", "meu nome é/eh X", "sou o/a X"
+        const nameInQuestion = question.match(/\b(?:me chamo|meu nome (?:é|eh|e)|sou (?:o |a )?|aqui é o? ?)\s*([A-ZÁÀÂÃÉÊÍÓÔÕÚÇa-záàâãéêíóôõúç]+(?:\s+[A-ZÁÀÂÃÉÊÍÓÔÕÚÇa-záàâãéêíóôõúç]+){0,3})/i);
+
+        // Extrai WhatsApp brasileiro (com ou sem parênteses/traços/DDI)
+        const phoneRegex = /(?:\+?55\s*)?\(?(\d{2})\)?[-.\s]?9?\d{4}[-.\s]?\d{4}/;
+        const phoneInQuestion = question.match(phoneRegex);
+        const phoneInAnswer = cleanAnswer.match(phoneRegex);
+
+        const extractedPhone = phoneInQuestion?.[0] ?? phoneInAnswer?.[0] ?? null;
+        const extractedName = (nameInQuestion?.[1] ?? nameInAnswer?.[1])?.trim() ?? null;
+
+        if (extractedName && extractedPhone) {
+          // Mapeia área para tipo_caso genérico (Sofia pode refinar depois)
+          const areaToTipoCaso: Record<string, string> = {
+            previdenciario: "Previdenciário - a confirmar",
+            civil: "Cível - a confirmar",
+            bancario: "Bancário - a confirmar",
+            geral: "A confirmar",
+          };
+
+          fallbackLead = {
+            nome: extractedName,
+            whatsapp: extractedPhone.trim(),
+            tipo_caso: areaToTipoCaso[area] ?? "A confirmar",
+            situacao_atual: question.slice(0, 200),
+            descricao_resumida: cleanAnswer.slice(0, 200),
+            temperatura: "quente", // Sofia confirmou dados = interesse concreto
+          };
+
+          console.log("[chat-agent] ✨ FALLBACK: lead extraído heuristicamente da conversa:", {
+            nome: fallbackLead.nome,
+            whatsapp: fallbackLead.whatsapp,
+            area,
+          });
+        } else {
+          console.log("[chat-agent] [DEBUG] fallback: Sofia confirmou mas regex não extraiu nome+phone:", {
+            has_name: !!extractedName,
+            has_phone: !!extractedPhone,
+          });
+        }
+      }
+    }
+    const effectiveLeadData = leadData ?? fallbackLead;
+
     // ─────────────────────────────────────────────────────────────────────────
     // 9. SALVAR RESPOSTA DA SOFIA (sem metadados)
     // ─────────────────────────────────────────────────────────────────────────
@@ -2187,13 +2261,18 @@ serve(async (req: Request) => {
     // 10. CRIAR LEAD (se metadados foram detectados)
     // ─────────────────────────────────────────────────────────────────────────
 
-    // Se a Sofia incluiu metadados de lead E os dados essenciais estão presentes
-    if (leadData && leadData.nome && leadData.whatsapp && leadData.tipo_caso) {
+    // Se a Sofia incluiu metadados de lead (OU o fallback heurístico extraiu) E os dados essenciais estão presentes
+    if (
+      effectiveLeadData &&
+      effectiveLeadData.nome &&
+      effectiveLeadData.whatsapp &&
+      effectiveLeadData.tipo_caso
+    ) {
       // Validação adicional: não criar lead se os dados forem placeholders
       const isValidLead =
-        leadData.nome !== "Não informado" &&
-        leadData.whatsapp !== "Não informado" &&
-        leadData.tipo_caso !== "Não informado";
+        effectiveLeadData.nome !== "Não informado" &&
+        effectiveLeadData.whatsapp !== "Não informado" &&
+        effectiveLeadData.tipo_caso !== "Não informado";
 
       if (isValidLead) {
         // Monta objeto Lead completo
@@ -2201,12 +2280,12 @@ serve(async (req: Request) => {
           org_id,
           conversation_id: convId,
           client_id: client_id || undefined,
-          nome: leadData.nome,
-          whatsapp: leadData.whatsapp,
-          tipo_caso: leadData.tipo_caso,
-          situacao_atual: leadData.situacao_atual || null,
-          descricao_resumida: leadData.descricao_resumida || null,
-          temperatura: (leadData.temperatura as LeadTemperatura) || "morno",
+          nome: effectiveLeadData.nome,
+          whatsapp: effectiveLeadData.whatsapp,
+          tipo_caso: effectiveLeadData.tipo_caso,
+          situacao_atual: effectiveLeadData.situacao_atual || null,
+          descricao_resumida: effectiveLeadData.descricao_resumida || null,
+          temperatura: (effectiveLeadData.temperatura as LeadTemperatura) || "morno",
           status: "novo",
         };
 
@@ -2214,11 +2293,13 @@ serve(async (req: Request) => {
         const leadId = await createLead(supabase, fullLead);
 
         if (leadId) {
+          const leadSource = leadData ? "llm_metadata" : "heuristic_fallback";
           console.log("[chat-agent] ✨ Lead capturado automaticamente:", {
             lead_id: leadId,
             nome: fullLead.nome,
             tipo_caso: fullLead.tipo_caso,
             temperatura: fullLead.temperatura,
+            source: leadSource,
           });
 
           // Track evento de lead criado (com contexto enriquecido)
@@ -2229,9 +2310,10 @@ serve(async (req: Request) => {
             intent: intentData.intent,
             sentiment: emotionalContext.sentiment,
             urgency: emotionalContext.urgency,
-            has_horario_contato: !!leadData.melhor_horario_contato,
-            has_canal_preferido: !!leadData.canal_preferido,
-            has_cidade_uf: !!leadData.cidade_uf,
+            has_horario_contato: !!effectiveLeadData.melhor_horario_contato,
+            has_canal_preferido: !!effectiveLeadData.canal_preferido,
+            has_cidade_uf: !!effectiveLeadData.cidade_uf,
+            source: leadSource,
           });
 
           // ─────────────────────────────────────────────────────────────────────
@@ -2249,36 +2331,52 @@ serve(async (req: Request) => {
             temperatura: fullLead.temperatura,
             situacao_atual: fullLead.situacao_atual,
             descricao_resumida: fullLead.descricao_resumida,
-            melhor_horario_contato: leadData.melhor_horario_contato ?? null,
-            canal_preferido: leadData.canal_preferido ?? null,
-            cidade_uf: leadData.cidade_uf ?? null,
+            melhor_horario_contato: effectiveLeadData.melhor_horario_contato ?? null,
+            canal_preferido: effectiveLeadData.canal_preferido ?? null,
+            cidade_uf: effectiveLeadData.cidade_uf ?? null,
             conversation_id: convId,
             sentiment: emotionalContext.sentiment,
             urgency: emotionalContext.urgency,
           };
-          fetch(notifyUrl, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""}`,
-            },
-            body: JSON.stringify(notifyPayload),
-          })
-            .then(async (response) => {
-              if (!response.ok) {
-                const body = await response.text().catch(() => "");
-                console.warn(
-                  "[chat-agent] send-lead-notification retornou não-OK:",
-                  response.status,
-                  body.slice(0, 200),
-                );
-              } else {
-                console.log("[chat-agent] 📧 Notificação por email disparada para lead", leadId);
-              }
-            })
-            .catch((err) => {
-              console.warn("[chat-agent] send-lead-notification falhou (não-crítico):", err);
+          // IMPORTANTE: await aqui (não fire-and-forget) porque o Supabase
+          // Edge Runtime mata o worker logo após a response HTTP retornar,
+          // cancelando fetches pendentes. Esperamos a notificação de email
+          // completar — adiciona ~500ms-1s à resposta, mas garante que o
+          // e-mail realmente saia.
+          try {
+            // Usa SOFIA_PUBLIC_ANON_KEY (secret custom) porque as env vars
+            // auto-injetadas pelo Supabase (SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY)
+            // estão retornando string vazia ou formato incompatível no runtime,
+            // causando 401 UNAUTHORIZED_INVALID_JWT_FORMAT no JWT verifier.
+            // Anon key é seguro para chamadas internas entre Edge Functions.
+            const authKey =
+              Deno.env.get("SOFIA_PUBLIC_ANON_KEY") ??
+              Deno.env.get("SUPABASE_ANON_KEY") ??
+              Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ??
+              "";
+            const notifyResponse = await fetch(notifyUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${authKey}`,
+                apikey: authKey,
+              },
+              body: JSON.stringify(notifyPayload),
             });
+            if (!notifyResponse.ok) {
+              const body = await notifyResponse.text().catch(() => "");
+              console.warn(
+                "[chat-agent] send-lead-notification retornou não-OK:",
+                notifyResponse.status,
+                body.slice(0, 200),
+              );
+            } else {
+              const body = await notifyResponse.json().catch(() => ({}));
+              console.log("[chat-agent] 📧 Notificação por email disparada para lead", leadId, body);
+            }
+          } catch (err) {
+            console.warn("[chat-agent] send-lead-notification falhou (não-crítico):", err);
+          }
 
           // ─────────────────────────────────────────────────────────────────────
           // ATUALIZAR SCORE DO LEAD (Sistema de Qualificação Automática)
