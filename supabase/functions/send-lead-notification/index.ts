@@ -18,19 +18,73 @@
  *   Padrão: contato@buenodiniz.com.br
  * - NOTIFICATION_EMAIL_FROM (opcional): override do remetente.
  *   Padrão: "Sofia Legal AI <nao-responda@buenodiniz.com.br>"
+ * - SOFIA_INTERNAL_FUNCTION_SECRET: segredo compartilhado com o chat-agent.
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { Resend } from "https://esm.sh/resend@2.0.0";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-
 type Temperatura = "quente" | "morno" | "frio";
+
+const ALLOWED_ORIGINS = new Set([
+  "https://www.buenodiniz.com.br",
+  "https://buenodiniz.com.br",
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://localhost:8080",
+]);
+
+const DEFAULT_CORS_ORIGIN = "https://www.buenodiniz.com.br";
+const MAX_TEXT_LENGTH = 500;
+
+function getCorsOrigin(req?: Request): string {
+  const origin = req?.headers.get("origin");
+  if (origin && ALLOWED_ORIGINS.has(origin)) return origin;
+  return DEFAULT_CORS_ORIGIN;
+}
+
+function corsHeadersFor(req?: Request): HeadersInit {
+  return {
+    "Access-Control-Allow-Origin": getCorsOrigin(req),
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-sofia-internal-secret",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
+  };
+}
+
+function jsonResponse(req: Request, data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
+    status,
+  });
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function safeText(value: unknown, maxLength = MAX_TEXT_LENGTH): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.slice(0, maxLength);
+}
+
+function requireInternalSecret(req: Request): boolean {
+  const expectedSecret = Deno.env.get("SOFIA_INTERNAL_FUNCTION_SECRET");
+  if (!expectedSecret) {
+    console.error("[send-lead-notification] SOFIA_INTERNAL_FUNCTION_SECRET não configurado");
+    return false;
+  }
+  return req.headers.get("x-sofia-internal-secret") === expectedSecret;
+}
 
 interface SofiaLeadPayload {
   nome: string;
@@ -47,6 +101,44 @@ interface SofiaLeadPayload {
   score?: number | null;
   sentiment?: string | null;
   urgency?: string | null;
+}
+
+function sanitizeLeadPayload(raw: unknown): SofiaLeadPayload | null {
+  if (!raw || typeof raw !== "object") return null;
+
+  const source = raw as Record<string, unknown>;
+  const nome = safeText(source.nome, 120);
+  const whatsapp = safeText(source.whatsapp, 40);
+  const tipo_caso = safeText(source.tipo_caso, 160);
+
+  if (!nome || !whatsapp || !tipo_caso) return null;
+
+  const temperaturaRaw = safeText(source.temperatura, 20);
+  const temperatura: Temperatura =
+    temperaturaRaw === "quente" || temperaturaRaw === "morno" || temperaturaRaw === "frio"
+      ? temperaturaRaw
+      : "morno";
+
+  const score = typeof source.score === "number" && Number.isFinite(source.score)
+    ? Math.max(0, Math.min(100, source.score))
+    : null;
+
+  return {
+    nome,
+    whatsapp,
+    tipo_caso,
+    temperatura,
+    situacao_atual: safeText(source.situacao_atual, 800) ?? null,
+    descricao_resumida: safeText(source.descricao_resumida, 1000) ?? null,
+    melhor_horario_contato: safeText(source.melhor_horario_contato, 120) ?? null,
+    canal_preferido: safeText(source.canal_preferido, 80) ?? null,
+    cidade_uf: safeText(source.cidade_uf, 120) ?? null,
+    conversation_id: safeText(source.conversation_id, 80) ?? null,
+    lead_id: safeText(source.lead_id, 80) ?? null,
+    score,
+    sentiment: safeText(source.sentiment, 80) ?? null,
+    urgency: safeText(source.urgency, 80) ?? null,
+  };
 }
 
 /** Configurações visuais por temperatura (emoji + cor + rótulo) */
@@ -86,19 +178,26 @@ function buildEmailHtml(lead: SofiaLeadPayload): string {
 
   const row = (label: string, value: string | null | undefined): string => {
     if (!value) return "";
+    const safeLabel = escapeHtml(label);
+    const safeValue = escapeHtml(value);
     return `
       <div style="margin-bottom: 14px;">
-        <p style="margin: 0 0 4px 0; color: #64748b; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">${label}</p>
-        <p style="margin: 0; color: #1e293b; font-size: 15px; font-weight: 500; line-height: 1.5;">${value}</p>
+        <p style="margin: 0 0 4px 0; color: #64748b; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">${safeLabel}</p>
+        <p style="margin: 0; color: #1e293b; font-size: 15px; font-weight: 500; line-height: 1.5;">${safeValue}</p>
       </div>`;
   };
+
+  const safeName = escapeHtml(lead.nome);
+  const safeWhatsappLink = escapeHtml(whatsappLink);
+  const safeConversationLink = conversationLink ? escapeHtml(conversationLink) : null;
+  const safeLeadId = lead.lead_id ? escapeHtml(lead.lead_id) : null;
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Novo Lead Sofia - ${lead.nome}</title>
+  <title>Novo Lead Sofia - ${safeName}</title>
 </head>
 <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f5f5;">
   <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff;">
@@ -149,7 +248,7 @@ function buildEmailHtml(lead: SofiaLeadPayload): string {
 
       <!-- CTA WhatsApp -->
       <div style="text-align: center; margin: 36px 0 20px 0;">
-        <a href="${whatsappLink}"
+        <a href="${safeWhatsappLink}"
            style="display: inline-block; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: #ffffff; text-decoration: none; padding: 16px 40px; border-radius: 12px; font-weight: 600; font-size: 16px; box-shadow: 0 4px 6px rgba(16, 185, 129, 0.3);">
           📱 Chamar no WhatsApp agora
         </a>
@@ -162,7 +261,7 @@ function buildEmailHtml(lead: SofiaLeadPayload): string {
         conversationLink
           ? `
       <div style="text-align: center; margin-bottom: 24px;">
-        <a href="${conversationLink}" style="color: #3b82f6; font-size: 13px; text-decoration: none;">
+        <a href="${safeConversationLink}" style="color: #3b82f6; font-size: 13px; text-decoration: none;">
           Ver conversa completa no painel →
         </a>
       </div>
@@ -177,9 +276,9 @@ function buildEmailHtml(lead: SofiaLeadPayload): string {
           <strong style="color: #1e293b;">buenodiniz.com.br</strong>
         </p>
         ${
-          lead.lead_id
+          safeLeadId
             ? `<p style="margin: 12px 0 0 0; color: #94a3b8; font-size: 11px; font-family: monospace;">
-          Lead ID: ${lead.lead_id}
+          Lead ID: ${safeLeadId}
         </p>`
             : ""
         }
@@ -192,79 +291,68 @@ function buildEmailHtml(lead: SofiaLeadPayload): string {
 
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders, status: 200 });
+    return new Response(null, { headers: corsHeadersFor(req), status: 200 });
   }
 
   if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 405,
-    });
+    return jsonResponse(req, { error: "Method not allowed" }, 405);
   }
 
   try {
+    if (!requireInternalSecret(req)) {
+      return jsonResponse(req, { error: "Unauthorized" }, 401);
+    }
+
     const resendApiKey = Deno.env.get("RESEND_API_KEY");
     if (!resendApiKey) {
       console.error("[send-lead-notification] RESEND_API_KEY não configurada");
-      return new Response(JSON.stringify({ error: "Email service not configured" }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 500,
-      });
+      return jsonResponse(req, { error: "Email service not configured" }, 500);
     }
 
-    const lead: SofiaLeadPayload = await req.json();
-
-    // Validação mínima — mesmo formato que o chat-agent usa pra criar lead
-    if (!lead.nome || !lead.whatsapp || !lead.tipo_caso) {
-      console.error("[send-lead-notification] Payload inválido:", lead);
-      return new Response(JSON.stringify({ error: "Missing required fields: nome, whatsapp, tipo_caso" }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 400,
-      });
+    let rawPayload: unknown;
+    try {
+      rawPayload = await req.json();
+    } catch {
+      return jsonResponse(req, { error: "Invalid JSON payload" }, 400);
     }
 
-    const temperatura = (lead.temperatura ?? "morno") as Temperatura;
-    const style = TEMPERATURA_STYLE[temperatura] ?? TEMPERATURA_STYLE.morno;
+    const lead = sanitizeLeadPayload(rawPayload);
+    if (!lead) {
+      console.error("[send-lead-notification] Payload inválido");
+      return jsonResponse(req, { error: "Missing required fields: nome, whatsapp, tipo_caso" }, 400);
+    }
+
+    const style = TEMPERATURA_STYLE[lead.temperatura] ?? TEMPERATURA_STYLE.morno;
 
     const resend = new Resend(resendApiKey);
 
     const from = Deno.env.get("NOTIFICATION_EMAIL_FROM") ?? "Sofia Legal AI <nao-responda@buenodiniz.com.br>";
     const to = Deno.env.get("NOTIFICATION_EMAIL_TO") ?? "contato@buenodiniz.com.br";
 
-    const subject = `${style.emoji} Lead ${style.label} (Sofia): ${lead.nome} — ${lead.tipo_caso}`;
+    const subject = `${style.emoji} Lead ${style.label} (Sofia): ${lead.nome} - ${lead.tipo_caso}`;
 
     const { data, error } = await resend.emails.send({
       from,
       to,
       subject,
-      html: buildEmailHtml({ ...lead, temperatura }),
+      html: buildEmailHtml(lead),
     });
 
     if (error) {
       console.error("[send-lead-notification] Erro Resend:", error);
-      return new Response(JSON.stringify({ error: "Failed to send email", details: error }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 500,
-      });
+      return jsonResponse(req, { error: "Failed to send email" }, 500);
     }
 
     console.log("[send-lead-notification] Email enviado:", {
       emailId: data?.id,
       lead_id: lead.lead_id,
-      temperatura,
-      nome: lead.nome,
+      temperatura: lead.temperatura,
     });
 
-    return new Response(
-      JSON.stringify({ success: true, emailId: data?.id, lead_id: lead.lead_id ?? null }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 200 },
-    );
+    return jsonResponse(req, { success: true, emailId: data?.id, lead_id: lead.lead_id ?? null });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[send-lead-notification] Erro inesperado:", message);
-    return new Response(JSON.stringify({ error: "Internal server error", details: message }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 500,
-    });
+    return jsonResponse(req, { error: "Internal server error" }, 500);
   }
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { SOFIA_ORG_ID } from "@/lib/constants";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -64,6 +64,10 @@ interface TimelineData {
   conversion_rate: number;
 }
 
+interface TimelineRpcData extends Omit<TimelineData, "period"> {
+  period: string;
+}
+
 interface LeadScoreData {
   classification: string;
   count: number;
@@ -79,6 +83,12 @@ interface AbandonmentMetrics {
   low_risk_count: number;
   avg_risk_score: number;
   high_risk_percentage: number;
+}
+
+type TimeRange = "7d" | "30d" | "90d";
+
+function isTimeRange(value: string): value is TimeRange {
+  return value === "7d" || value === "30d" || value === "90d";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -122,17 +132,13 @@ export default function Analytics() {
   const [leadScores, setLeadScores] = useState<LeadScoreData[]>([]);
   const [abandonmentMetrics, setAbandonmentMetrics] = useState<AbandonmentMetrics | null>(null);
   const [loading, setLoading] = useState(true);
-  const [timeRange, setTimeRange] = useState<"7d" | "30d" | "90d">("30d");
+  const [timeRange, setTimeRange] = useState<TimeRange>("30d");
 
   // ═══════════════════════════════════════════════════════════════════════
   // LOAD DATA
   // ═══════════════════════════════════════════════════════════════════════
 
-  useEffect(() => {
-    loadAllData();
-  }, [timeRange]);
-
-  async function loadAllData() {
+  const loadAllData = useCallback(async () => {
     setLoading(true);
 
     try {
@@ -189,7 +195,7 @@ export default function Analytics() {
       });
       if (timelineData) {
         setTimeline(
-          timelineData.map((d: any) => ({
+          timelineData.map((d: TimelineRpcData) => ({
             ...d,
             period: new Date(d.period).toLocaleDateString("pt-BR", {
               day: "2-digit",
@@ -223,7 +229,11 @@ export default function Analytics() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [timeRange]);
+
+  useEffect(() => {
+    loadAllData();
+  }, [loadAllData]);
 
   // ═══════════════════════════════════════════════════════════════════════
   // RENDER
@@ -252,7 +262,12 @@ export default function Analytics() {
         </div>
 
         {/* Time Range Selector */}
-        <Tabs value={timeRange} onValueChange={(v) => setTimeRange(v as any)}>
+        <Tabs
+          value={timeRange}
+          onValueChange={(value) => {
+            if (isTimeRange(value)) setTimeRange(value);
+          }}
+        >
           <TabsList>
             <TabsTrigger value="7d">7 dias</TabsTrigger>
             <TabsTrigger value="30d">30 dias</TabsTrigger>
