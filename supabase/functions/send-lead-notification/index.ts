@@ -166,7 +166,7 @@ function buildWhatsAppLink(lead: SofiaLeadPayload): string {
 /** Link pro dashboard do Supabase pra abrir a conversa original (opcional) */
 function buildSupabaseConversationLink(lead: SofiaLeadPayload): string | null {
   if (!lead.conversation_id) return null;
-  const projectRef = Deno.env.get("SUPABASE_PROJECT_REF") ?? "zleirutbehcqzmlqtmsk";
+  const projectRef = Deno.env.get("PROJECT_REF") ?? "zleirutbehcqzmlqtmsk";
   return `https://supabase.com/dashboard/project/${projectRef}/editor?filter=conversation_id=eq.${lead.conversation_id}`;
 }
 

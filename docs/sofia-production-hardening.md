@@ -12,6 +12,7 @@ Configure os mesmos valores em todas as functions que precisam deles:
 
 - `SOFIA_INTERNAL_FUNCTION_SECRET`: segredo compartilhado entre `chat-agent`, `send-lead-notification` e `health-monitor`.
 - `SOFIA_PUBLIC_ANON_KEY`: anon key usada pelo `chat-agent` ao chamar outra Edge Function.
+- `PROJECT_REF`: ref do projeto Supabase, como `zleirutbehcqzmlqtmsk`.
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 
