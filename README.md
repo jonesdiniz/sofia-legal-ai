@@ -1,6 +1,6 @@
 # Sofia Legal AI
 
-Sofia Legal AI e o assistente juridico do site Bueno Diniz Advocacia. O projeto combina uma interface React com Edge Functions no Supabase para atendimento inicial, RAG, captura de leads, notificacoes por email, analytics e monitoramento operacional.
+Sofia Legal AI é o assistente juridico do site Bueno Diniz Advocacia. O projeto combina uma interface React com Edge Functions no Supabase para atendimento inicial, RAG, captura de leads, notificações por email, analytics e monitoramento operacional.
 
 ## Stack
 
