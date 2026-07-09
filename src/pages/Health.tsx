@@ -24,7 +24,7 @@ interface UnresolvedAlert {
   alert_type: string;
   severity: 'warning' | 'critical';
   message: string;
-  details: any;
+  details: Record<string, unknown> | null;
   created_at: string;
   age_minutes: number;
 }

@@ -9,6 +9,8 @@
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
+    "quality": "npm run lint && npm run test:run && npm run build",
+    "deploy:functions": "supabase functions deploy",
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:run": "vitest run"

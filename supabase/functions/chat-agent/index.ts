@@ -7,7 +7,7 @@
  * - RAG (Retrieval Augmented Generation) usando embeddings
  * - Memória de conversa (curto prazo) baseada em conversation_id
  * - LLM Híbrido: Gemini 2.0 Flash (chat) + OpenAI (embeddings apenas)
- * - Suporte multi-área: Previdenciário, Cível, Bancário
+ * - Suporte multi-área: Previdenciário, Cível, Bancário e Administrativo (servidor público)
  * - Persistência de mensagens no banco de dados
  *
  * VARIÁVEIS DE AMBIENTE NECESSÁRIAS:
@@ -15,6 +15,7 @@
  * - OPENAI_API_KEY: Chave da API da OpenAI (apenas embeddings)
  * - SUPABASE_URL: URL do projeto Supabase
  * - SUPABASE_SERVICE_ROLE_KEY: Service role key para acesso ao banco
+ * - SOFIA_INTERNAL_FUNCTION_SECRET: segredo para chamadas internas entre Edge Functions
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
@@ -154,7 +155,7 @@ async function callGemini(
 }
 
 // Tipo para área jurídica
-type AreaJuridica = "previdenciario" | "civil" | "bancario" | "geral";
+type AreaJuridica = "previdenciario" | "civil" | "bancario" | "administrativo" | "geral";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CORS / RESPOSTA
@@ -197,6 +198,11 @@ interface ChatHistoryMessage {
   content: string;
 }
 
+type SofiaSupabaseClient = {
+  from: (table: string) => any;
+  rpc: (fn: string, args?: Record<string, unknown>) => Promise<{ data: any; error: any }>;
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // TIPOS E INTERFACES - LEADS
 // ═══════════════════════════════════════════════════════════════════════════
@@ -216,11 +222,11 @@ interface Lead {
   nome: string;
   whatsapp: string;
   tipo_caso: string;
-  situacao_atual?: string;
-  descricao_resumida?: string;
-  melhor_horario_contato?: string;
-  canal_preferido?: string;
-  cidade_uf?: string;
+  situacao_atual?: string | null;
+  descricao_resumida?: string | null;
+  melhor_horario_contato?: string | null;
+  canal_preferido?: string | null;
+  cidade_uf?: string | null;
   temperatura: LeadTemperatura;
   status: LeadStatus;
 }
@@ -236,7 +242,7 @@ interface LeadMetadata {
 
 type Sentiment = "desperate" | "frustrated" | "hopeful" | "neutral";
 type Urgency = "high" | "medium" | "low";
-type Intent = "agendar" | "preco" | "documentos" | "urgente" | "duvida_tecnica" | "saudacao" | "unknown";
+export type Intent = "agendar" | "preco" | "documentos" | "urgente" | "duvida_tecnica" | "saudacao" | "unknown";
 
 interface EmotionalContext {
   sentiment: Sentiment;
@@ -253,31 +259,158 @@ interface IntentClassification {
 // HELPERS DE CORS E RESPOSTA
 // ═══════════════════════════════════════════════════════════════════════════
 
-function buildCorsHeaders(): HeadersInit {
-  // Lista de origens permitidas
-  const allowedOrigins = [
-    "https://www.buenodiniz.com.br",
-    "https://buenodiniz.com.br",
-    "http://localhost:5173", // dev local
-    "http://localhost:5174", // dev local alternativo
-    "http://localhost:8080", // dev local alternativo
-  ];
+const ALLOWED_ORIGINS = new Set([
+  "https://www.buenodiniz.com.br",
+  "https://buenodiniz.com.br",
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://localhost:8080",
+]);
 
+const DEFAULT_CORS_ORIGIN = "https://www.buenodiniz.com.br";
+const MAX_QUESTION_LENGTH = 2000;
+const MAX_BLOG_HINTS = 8;
+const MAX_BLOG_HINT_FIELD_LENGTH = 240;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 20;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ALLOWED_AREAS = new Set<AreaJuridica>(["previdenciario", "civil", "bancario", "administrativo", "geral"]);
+
+function getCorsOrigin(req?: Request): string {
+  const origin = req?.headers.get("origin");
+  if (origin && ALLOWED_ORIGINS.has(origin)) return origin;
+  return DEFAULT_CORS_ORIGIN;
+}
+
+function buildCorsHeaders(req?: Request): HeadersInit {
   return {
-    "Access-Control-Allow-Origin": "*", // Supabase Edge Functions gerenciam CORS internamente
+    "Access-Control-Allow-Origin": getCorsOrigin(req),
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
   };
 }
 
-function jsonResponse(data: unknown, status = 200) {
+function jsonResponse(data: unknown, status = 200, req?: Request) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "Content-Type": "application/json",
-      ...buildCorsHeaders(),
+      ...buildCorsHeaders(req),
     },
   });
+}
+
+function truncateString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.slice(0, maxLength);
+}
+
+function sanitizeBlogHints(raw: unknown): BlogHint[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+
+  const hints = raw
+    .slice(0, MAX_BLOG_HINTS)
+    .map((hint): BlogHint | null => {
+      if (!hint || typeof hint !== "object") return null;
+      const source = hint as Record<string, unknown>;
+      const title = truncateString(source.title, MAX_BLOG_HINT_FIELD_LENGTH);
+      const slug = truncateString(source.slug, MAX_BLOG_HINT_FIELD_LENGTH);
+      if (!title || !slug) return null;
+
+      const sanitized: BlogHint = { title, slug };
+      const excerpt = truncateString(source.excerpt, MAX_BLOG_HINT_FIELD_LENGTH);
+      const category = truncateString(source.category, 80);
+      const area = truncateString(source.area, 40);
+      if (excerpt) sanitized.excerpt = excerpt;
+      if (category) sanitized.category = category;
+      if (area) sanitized.area = area;
+      return sanitized;
+    })
+    .filter((hint): hint is BlogHint => hint !== null);
+
+  return hints.length > 0 ? hints : undefined;
+}
+
+function validatePayload(raw: unknown): { payload?: RequestPayload; error?: string } {
+  if (!raw || typeof raw !== "object") {
+    return { error: "Payload JSON inválido." };
+  }
+
+  const source = raw as Record<string, unknown>;
+  const orgId = truncateString(source.org_id, 80);
+  const question = truncateString(source.question, MAX_QUESTION_LENGTH);
+  const clientId = truncateString(source.client_id, 120);
+  const conversationId = truncateString(source.conversation_id, 80);
+  const requestedArea = truncateString(source.area, 40) as AreaJuridica | undefined;
+
+  if (!orgId || !question) {
+    return { error: "Campos obrigatórios: org_id, question." };
+  }
+  if (!UUID_RE.test(orgId)) {
+    return { error: "org_id inválido." };
+  }
+  if (conversationId && !UUID_RE.test(conversationId)) {
+    return { error: "conversation_id inválido." };
+  }
+  if (requestedArea && !ALLOWED_AREAS.has(requestedArea)) {
+    return { error: "area inválida." };
+  }
+
+  return {
+    payload: {
+      org_id: orgId,
+      question,
+      client_id: clientId,
+      conversation_id: conversationId,
+      area: requestedArea || "geral",
+      blog_hints: sanitizeBlogHints(source.blog_hints),
+    },
+  };
+}
+
+function getRateLimitIdentifier(req: Request): string {
+  const forwardedFor = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  const cfConnectingIp = req.headers.get("cf-connecting-ip")?.trim();
+  const realIp = req.headers.get("x-real-ip")?.trim();
+  const origin = req.headers.get("origin")?.trim();
+  return forwardedFor || cfConnectingIp || realIp || origin || "unknown";
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const data = new TextEncoder().encode(value);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hash))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function enforceRateLimit(
+  supabase: SofiaSupabaseClient,
+  req: Request,
+): Promise<boolean> {
+  try {
+    const identifierHash = await sha256Hex(getRateLimitIdentifier(req));
+    const windowStart = new Date(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS) * RATE_LIMIT_WINDOW_MS).toISOString();
+    const { data, error } = await supabase.rpc("increment_edge_rate_limit", {
+      p_route: "chat-agent",
+      p_identifier_hash: identifierHash,
+      p_window_start: windowStart,
+    });
+
+    if (error) {
+      console.warn("[chat-agent] Rate limit indisponível; permitindo request:", error);
+      return true;
+    }
+
+    return Number(data ?? 0) <= RATE_LIMIT_MAX_REQUESTS;
+  } catch (error) {
+    console.warn("[chat-agent] Falha ao aplicar rate limit; permitindo request:", error);
+    return true;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -293,6 +426,7 @@ function buildHumanFallback(area: AreaJuridica, _question: string): string {
     previdenciario: "área previdenciária (aposentadoria, INSS, benefícios)",
     civil: "área cível (família, inventário, contratos)",
     bancario: "área bancária (juros, Pix, negativação)",
+    administrativo: "área administrativa (servidor público, PAD, concurso, reintegração)",
     geral: "nossas áreas de atuação",
   };
 
@@ -325,7 +459,7 @@ function buildHumanFallback(area: AreaJuridica, _question: string): string {
  * @returns ID do lead criado ou null em caso de erro
  */
 async function createLead(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SofiaSupabaseClient,
   leadData: Lead
 ): Promise<string | null> {
   try {
@@ -761,7 +895,7 @@ Responda APENAS com JSON válido:
  * @param metadata - Dados adicionais do evento
  */
 async function trackEvent(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SofiaSupabaseClient,
   eventType: string,
   orgId: string,
   conversationId: string,
@@ -799,7 +933,7 @@ async function trackEvent(
  * @param abandonmentContext - Contexto emocional e comportamental
  */
 async function scheduleFollowUp(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SofiaSupabaseClient,
   leadId: string,
   conversationId: string,
   orgId: string,
@@ -895,7 +1029,10 @@ async function scheduleFollowUp(
  * - Ordena por created_at ascendente (mais antigas primeiro)
  * - Retorna array vazio em caso de erro (fail-safe)
  */
-async function getConversationHistory(supabase: any, conversationId: string) {
+async function getConversationHistory(
+  supabase: SofiaSupabaseClient,
+  conversationId: string,
+): Promise<ChatHistoryMessage[]> {
   try {
     const { data: history, error: historyError } = await supabase
       .from("messages")
@@ -935,9 +1072,9 @@ async function getConversationHistory(supabase: any, conversationId: string) {
       console.log("[chat-agent] Última mensagem do usuário removida do histórico (evitar duplicação)");
     }
 
-    const chatHistory = historyWithoutCurrentQuestion.map((msg: any) => ({
+    const chatHistory: ChatHistoryMessage[] = historyWithoutCurrentQuestion.map((msg: { actor: string; content: unknown }) => ({
       role: msg.actor === "user" ? "user" : "assistant",
-      content: msg.content as string,
+      content: typeof msg.content === "string" ? msg.content : "",
     }));
 
     console.log("[chat-agent] Histórico processado:", {
@@ -1351,10 +1488,24 @@ REGRA: Quando o tema da dúvida do cliente for coberto por um desses artigos, RE
 - Cobranças abusivas e descontos indevidos
 - Tarifas ilegais, seguros embutidos, débitos não contratados`,
 
-    geral: `Você atua nas TRÊS áreas de atuação do escritório Bueno Diniz Advocacia & Consultoria Jurídica:
+    administrativo: `Sua especialidade nesta conversa é Direito Administrativo, com foco na defesa do servidor público (federal, estadual e municipal). Oriente sobre:
+- Sindicância e Processo Administrativo Disciplinar (PAD): defesa, prazos, ampla defesa e contraditório (Lei 8.112/1990 e estatutos estaduais/municipais)
+- Reintegração após demissão ilegal ou desproporcional
+- Nomeação e posse de aprovados em concurso (incluindo cadastro de reserva e preterição)
+- Direito à saúde do servidor: licença para tratamento, readaptação funcional, aposentadoria por invalidez
+- Licenças-prêmio, férias acumuladas, abono permanência, adicionais e indenizações funcionais
+- Irredutibilidade salarial: defesa contra cortes, supressões de gratificação, reenquadramento prejudicial
+- Mandado de segurança contra atos administrativos com ilegalidade clara (prazo decadencial de 120 dias)
+- Recursos administrativos hierárquicos contra decisões desfavoráveis
+- Responsabilidade civil do Estado por danos causados por agentes públicos
+
+ATENÇÃO: prazos no Direito Administrativo são curtos e decadenciais. Comunique sempre com clareza a urgência ao lead — perder o prazo significa perder o direito.`,
+
+    geral: `Você atua nas QUATRO áreas de atuação do escritório Bueno Diniz Advocacia & Consultoria Jurídica:
 - Direito Previdenciário (aposentadorias, INSS, BPC/LOAS)
 - Direito Cível (família, inventário, contratos, indenizações)
 - Direito Bancário (fraudes, juros abusivos, negativação indevida)
+- Direito Administrativo (servidor público, PAD, concursos, reintegração)
 
 Identifique a área do caso logo no início da conversa e oriente-se por ela. Se o assunto for de outra área (criminal, trabalhista), encaminhe gentilmente a pessoa para outro profissional.`,
   }[area];
@@ -1942,7 +2093,7 @@ Você não responde apenas dúvidas. Você cuida de pessoas em momentos sensíve
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", {
-      headers: buildCorsHeaders(),
+      headers: buildCorsHeaders(req),
     });
   }
 
@@ -1953,10 +2104,23 @@ serve(async (req: Request) => {
           error: "Método não permitido",
         },
         405,
+        req,
       );
     }
 
-    const payload = await req.json();
+    let rawPayload: unknown;
+    try {
+      rawPayload = await req.json();
+    } catch {
+      return jsonResponse({ error: "JSON inválido." }, 400, req);
+    }
+
+    const validation = validatePayload(rawPayload);
+    if (!validation.payload) {
+      return jsonResponse({ error: validation.error }, 400, req);
+    }
+
+    const payload = validation.payload;
     const { org_id, question, client_id, conversation_id, area } = payload;
     const currentArea: AreaJuridica = area || "geral";
 
@@ -1968,19 +2132,21 @@ serve(async (req: Request) => {
       area: currentArea,
     });
 
-    if (!org_id || !question) {
-      return jsonResponse(
-        {
-          error: "Campos obrigatórios: org_id, question",
-        },
-        400,
-      );
-    }
-
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
-    );
+    ) as unknown as SofiaSupabaseClient;
+
+    const isAllowedByRateLimit = await enforceRateLimit(supabase, req);
+    if (!isAllowedByRateLimit) {
+      return jsonResponse(
+        {
+          error: "Muitas mensagens em pouco tempo. Aguarde alguns instantes e tente novamente.",
+        },
+        429,
+        req,
+      );
+    }
 
     // OpenAI é mantido APENAS para embeddings (text-embedding-3-small)
     const openai = new OpenAI({
@@ -1991,7 +2157,7 @@ serve(async (req: Request) => {
     const geminiApiKey = Deno.env.get("GEMINI_API_KEY") ?? "";
     if (!geminiApiKey) {
       console.error("[chat-agent] GEMINI_API_KEY não configurada!");
-      return jsonResponse({ error: "Configuração de IA incompleta" }, 500);
+      return jsonResponse({ error: "Configuração de IA incompleta" }, 500, req);
     }
 
     const convId = await ensureConversation(supabase, org_id, client_id || null, conversation_id || null);
@@ -2069,7 +2235,7 @@ serve(async (req: Request) => {
         answer,
         conversation_id: convId,
         context_used: [],
-      });
+      }, 200, req);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2124,7 +2290,7 @@ serve(async (req: Request) => {
         emotionalContext,
         abandonmentRisk || undefined,
         currentArea,
-        payload.blog_hints as BlogHint[] | undefined,
+        payload.blog_hints,
       );
     } catch (err) {
       const isQuotaOrNetwork =
@@ -2197,13 +2363,14 @@ serve(async (req: Request) => {
             previdenciario: "Previdenciário - a confirmar",
             civil: "Cível - a confirmar",
             bancario: "Bancário - a confirmar",
+            administrativo: "Administrativo - a confirmar",
             geral: "A confirmar",
           };
 
           fallbackLead = {
             nome: extractedName,
             whatsapp: extractedPhone.trim(),
-            tipo_caso: areaToTipoCaso[area] ?? "A confirmar",
+            tipo_caso: areaToTipoCaso[currentArea] ?? "A confirmar",
             situacao_atual: question.slice(0, 200),
             descricao_resumida: cleanAnswer.slice(0, 200),
             temperatura: "quente", // Sofia confirmou dados = interesse concreto
@@ -2344,22 +2511,21 @@ serve(async (req: Request) => {
           // completar — adiciona ~500ms-1s à resposta, mas garante que o
           // e-mail realmente saia.
           try {
-            // Usa SOFIA_PUBLIC_ANON_KEY (secret custom) porque as env vars
-            // auto-injetadas pelo Supabase (SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY)
-            // estão retornando string vazia ou formato incompatível no runtime,
-            // causando 401 UNAUTHORIZED_INVALID_JWT_FORMAT no JWT verifier.
-            // Anon key é seguro para chamadas internas entre Edge Functions.
+            // A anon key satisfaz o JWT verifier da Edge Function; o segredo
+            // interno abaixo é o que realmente autoriza o envio do email.
             const authKey =
               Deno.env.get("SOFIA_PUBLIC_ANON_KEY") ??
               Deno.env.get("SUPABASE_ANON_KEY") ??
               Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ??
               "";
+            const internalSecret = Deno.env.get("SOFIA_INTERNAL_FUNCTION_SECRET") ?? "";
             const notifyResponse = await fetch(notifyUrl, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 Authorization: `Bearer ${authKey}`,
                 apikey: authKey,
+                "x-sofia-internal-secret": internalSecret,
               },
               body: JSON.stringify(notifyPayload),
             });
@@ -2444,15 +2610,15 @@ serve(async (req: Request) => {
         content: c.content,
         similarity: c.similarity,
       })),
-    });
+    }, 200, req);
   } catch (error) {
     console.error("[chat-agent] Erro crítico:", error);
     return jsonResponse(
       {
         error: "Erro interno ao processar mensagem",
-        details: error instanceof Error ? error.message : String(error),
       },
       500,
+      req,
     );
   }
 });

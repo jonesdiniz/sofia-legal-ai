@@ -3,6 +3,7 @@ import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { RequireAuth } from "./components/RequireAuth";
 import Chat from "./pages/Chat";
 import Sobre from "./pages/Sobre";
 import Politica from "./pages/Politica";
@@ -23,8 +24,8 @@ const App = () => (
           <Route path="/chat" element={<Chat />} />
           <Route path="/sobre" element={<Sobre />} />
           <Route path="/politica" element={<Politica />} />
-          <Route path="/analytics" element={<Analytics />} />
-          <Route path="/health" element={<Health />} />
+          <Route path="/analytics" element={<RequireAuth><Analytics /></RequireAuth>} />
+          <Route path="/health" element={<RequireAuth><Health /></RequireAuth>} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
