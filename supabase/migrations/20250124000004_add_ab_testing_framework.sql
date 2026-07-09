@@ -100,8 +100,9 @@ BEGIN
 
   -- Conta atribuições atuais para balancear
   SELECT
-    COUNT(*) FILTER (WHERE variant = 'A') INTO v_count_a,
-    COUNT(*) FILTER (WHERE variant = 'B') INTO v_count_b
+    COUNT(*) FILTER (WHERE variant = 'A'),
+    COUNT(*) FILTER (WHERE variant = 'B')
+  INTO v_count_a, v_count_b
   FROM experiment_assignments
   WHERE experiment_id = p_experiment_id;
 
