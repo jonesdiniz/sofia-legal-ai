@@ -1,73 +1,118 @@
-# Welcome to your Lovable project
+# Sofia Legal AI
 
-## Project info
+Sofia Legal AI e o assistente juridico do site Bueno Diniz Advocacia. O projeto combina uma interface React com Edge Functions no Supabase para atendimento inicial, RAG, captura de leads, notificacoes por email, analytics e monitoramento operacional.
 
-**URL**: https://lovable.dev/projects/9955fac1-5602-46ea-91a5-4862204619ef
+## Stack
 
-## How can I edit this code?
+- Vite
+- React
+- TypeScript
+- Tailwind CSS
+- shadcn/ui
+- Supabase Auth, Database e Edge Functions
+- Gemini para chat
+- OpenAI para embeddings
+- Resend para notificacoes por email
 
-There are several ways of editing your application.
+## Estrutura Principal
 
-**Use Lovable**
+```text
+src/
+  components/      Componentes da interface
+  hooks/           Hooks do chat
+  pages/           Rotas publicas e administrativas
+  integrations/    Cliente Supabase do frontend
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/9955fac1-5602-46ea-91a5-4862204619ef) and start prompting.
+supabase/
+  functions/       Edge Functions da Sofia
+  migrations/      Migrations do banco Supabase
 
-Changes made via Lovable will be committed automatically to this repo.
+docs/
+  sofia-production-hardening.md
+```
 
-**Use your preferred IDE**
+## Rotas
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+- `/chat`: chat publico da Sofia.
+- `/sobre`: informacoes institucionais da Sofia.
+- `/politica`: politica de privacidade.
+- `/analytics`: painel administrativo protegido por Supabase Auth.
+- `/health`: painel de saude operacional protegido por Supabase Auth.
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+## Desenvolvimento Local
 
-Follow these steps:
+Requisitos:
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+- Node.js
+- npm
+- Deno, para checar Edge Functions
+- Supabase CLI, para operacoes de banco/functions
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+Instalacao:
 
-# Step 3: Install the necessary dependencies.
-npm i
+```bash
+npm ci
+```
 
-# Step 4: Start the development server with auto-reloading and an instant preview.
+Servidor local:
+
+```bash
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+Validacao completa:
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+```bash
+npm run quality
+deno check supabase/functions/chat-agent/index.ts supabase/functions/send-lead-notification/index.ts supabase/functions/health-monitor/index.ts
+```
 
-**Use GitHub Codespaces**
+## Variaveis De Ambiente
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+Use `.env.example` como referencia. As variaveis do frontend usam prefixo `VITE_`. As Edge Functions usam secrets do Supabase.
 
-## What technologies are used for this project?
+Secrets principais das Edge Functions:
 
-This project is built with:
+- `GEMINI_API_KEY`
+- `OPENAI_API_KEY`
+- `RESEND_API_KEY`
+- `SOFIA_PUBLIC_ANON_KEY`
+- `SOFIA_INTERNAL_FUNCTION_SECRET`
+- `PROJECT_REF`
+- `NOTIFICATION_EMAIL_TO`
+- `NOTIFICATION_EMAIL_FROM`
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+Os defaults do Supabase tambem ficam disponiveis nas Edge Functions, incluindo `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`.
 
-## How can I deploy this project?
+## Deploy
 
-Simply open [Lovable](https://lovable.dev/projects/9955fac1-5602-46ea-91a5-4862204619ef) and click on Share -> Publish.
+O deploy de producao e feito pelo GitHub Actions em push na branch `main`.
 
-## Can I connect a custom domain to my Lovable project?
+O workflow:
 
-Yes, you can!
+1. Instala dependencias.
+2. Roda lint, testes e build.
+3. Checa Edge Functions com Deno.
+4. Aplica migrations no Supabase.
+5. Publica as Edge Functions.
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+Secrets necessarios no GitHub Actions:
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+- `SUPABASE_ACCESS_TOKEN`
+- `SUPABASE_DB_PASSWORD`
+- `SUPABASE_PROJECT_REF`
+
+## Edge Functions
+
+- `chat-agent`: endpoint principal do chat, RAG, memoria de conversa, captura de leads e tracking.
+- `send-lead-notification`: envio interno de email quando um lead e criado.
+- `health-monitor`: rotina interna de monitoramento e alertas.
+
+As chamadas internas usam `SOFIA_INTERNAL_FUNCTION_SECRET`.
+
+## Observacoes De Producao
+
+- O chat publico deve continuar acessivel sem login.
+- Os paineis administrativos dependem de usuarios criados no Supabase Auth.
+- Alteracoes de migrations devem ser revisadas com cuidado, pois sao aplicadas automaticamente na `main`.
+- Mais detalhes estao em `docs/sofia-production-hardening.md`.
