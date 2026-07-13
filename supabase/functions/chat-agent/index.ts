@@ -2428,6 +2428,8 @@ serve(async (req: Request) => {
     // 10. CRIAR LEAD (se metadados foram detectados)
     // ─────────────────────────────────────────────────────────────────────────
 
+    let leadCreated = false;
+
     // Se a Sofia incluiu metadados de lead (OU o fallback heurístico extraiu) E os dados essenciais estão presentes
     if (
       effectiveLeadData &&
@@ -2460,6 +2462,7 @@ serve(async (req: Request) => {
         const leadId = await createLead(supabase, fullLead);
 
         if (leadId) {
+          leadCreated = true;
           const leadSource = leadData ? "llm_metadata" : "heuristic_fallback";
           console.log("[chat-agent] ✨ Lead capturado automaticamente:", {
             lead_id: leadId,
@@ -2606,6 +2609,7 @@ serve(async (req: Request) => {
     return jsonResponse({
       answer: cleanAnswer, // <-- Retorna resposta SEM metadados
       conversation_id: convId,
+      lead_created: leadCreated,
       context_used: contextChunks.map((c: any) => ({
         content: c.content,
         similarity: c.similarity,
